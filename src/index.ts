@@ -18,6 +18,8 @@ import {
     applySpansIn,
     captureOffsets,
     collectEditableGroups,
+    readDecorationStylesIn,
+    reclaimEditableElement,
     restoreOffsets,
 } from "./dom";
 import type {IEditableGroup} from "./dom";
@@ -55,9 +57,6 @@ const SAVE_DEBOUNCE_MS = 300;
 
 /** 记住上次配置的插件私有存储文件名 */
 const SETTINGS_FILE = "settings.json";
-
-/** 装饰 span 的标记属性；打开面板时靠它找出选区里已有的装饰 */
-const MARK_ATTRIBUTE = "data-sue";
 
 /** 块 id 的属性名；防抖保存的记账键必须与元素自身的这个值一致 */
 const NODE_ID_ATTRIBUTE = "data-node-id";
@@ -234,23 +233,23 @@ export default class UnderlineEnhancement extends Plugin {
     /**
      * 撤销后的重新认领。
      *
-     * 撤销是把整块 HTML 换回去，块元素连同子树一起换掉，之前拿在手里的引用随即脱管；
-     * 不重新认领的话，下一次改动会去装饰一个已经不在文档里的节点，屏幕与磁盘就此分家。
-     * 可编辑区域本身还连着文档时（表格单元格、callout 标题区）沿用旧节点，只有块自身被换掉时才换成新块。
+     * 撤销是把整块 HTML 换回去，块连同子树一起换掉，之前拿在手里的引用随即脱管；
+     * 不重新认领的话，下一次改动会去装饰一个已经不在文档里的节点：屏幕上什么也不出现，
+     * 磁盘上多一次内容没变的 updateBlock，面板显示的选区也不存在，下一次撤销还会因
+     * afterHTML 校验不过而被静默丢弃。可编辑区域本身是新块里的哪一个，由 dom.ts 按位置判定。
      */
     private claimBlocks(): void {
         for (let i = 0; i < this.groups.length; i++) {
             const group = this.groups[i];
             const blockId = group.blockElement.getAttribute(NODE_ID_ATTRIBUTE);
             const blockElement = blockId === null ? null : findBlockElement(blockId);
+            // 块已经不在文档里（被删除，或用户已切走），这一组就此作废
             if (blockElement === null) {
                 continue;
             }
-            if (group.editableElement === group.blockElement) {
-                group.editableElement = blockElement;
-                this.offsets[i][0] = blockElement;
-            }
+            group.editableElement = reclaimEditableElement(group.editableElement, blockElement);
             group.blockElement = blockElement;
+            this.offsets[i][0] = group.editableElement;
         }
     }
 
@@ -259,13 +258,11 @@ export default class UnderlineEnhancement extends Plugin {
      *
      * 方向不靠 span 的嵌套位置判断，而是交给 readPairFromStyle 从各自的 text-decoration-line 读：
      * 嵌套时外层是上划线、内层是下划线，合并成一个 data-sue="b" 的 span 则同时供给两个方向。
+     * 装饰只在选区范围内找：块里落在选区之外的装饰不描述当前这次选择。
      */
     private readCurrentPair(): IDecorationPair {
-        const spans = this.groups[0].editableElement.querySelectorAll(`[${MARK_ATTRIBUTE}]`);
-        const styles: string[] = [];
-        for (let i = 0; i < spans.length && styles.length < 2; i++) {
-            styles.push(spans[i].getAttribute("style"));
-        }
+        const group = this.groups[0];
+        const styles = readDecorationStylesIn(group.editableElement, group.start, group.end);
         const pair = readPairFromStyle(styles[0] ?? null, styles[1] ?? null);
         if (pair.underline.enabled || pair.overline.enabled) {
             return pair;

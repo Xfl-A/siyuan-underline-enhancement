@@ -507,7 +507,14 @@ export const createPanel = (options: IPanelOptions): IPanelController => {
 
     // 面板内的点击会冒泡到 document，靠 contains 把它们排除在「面板外」之外
     const handleOutsideEvent = (event: Event): void => {
-        if (destroyed || (event.target !== null && panel.contains(event.target as Node))) {
+        if (destroyed || event.target === null) {
+            return;
+        }
+        const target = event.target as Node;
+        // 浮动工具栏同样不算「面板外」：打开面板的那一次点击正是从工具栏按钮上冒泡过来的
+        // （思源的 ToolbarItem 只 preventDefault，不 stopPropagation，事件照样走到 document）。
+        // 把它当成面板外点击的话，面板会在打开的同一瞬间被自己的点击关掉。
+        if (panel.contains(target) || options.anchor?.contains(target) === true) {
             return;
         }
         options.onClose();

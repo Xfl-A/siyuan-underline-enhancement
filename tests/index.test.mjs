@@ -12,7 +12,8 @@ import {
     toHost,
 } from "./helpers/loadModule.mjs";
 
-const i18n = JSON.parse(readFileSync(new URL("../src/i18n/zh-CN.json", import.meta.url), "utf8"));
+// 直接读真实的语言文件：插件实际用到的每个键都要在这里有非空的文案
+const readLocale = (locale) => JSON.parse(readFileSync(new URL(`../src/i18n/${locale}.json`, import.meta.url), "utf8"));
 
 const BLOCK_A = "20261003220000-a1";
 const BLOCK_B = "20261003220000-b2";
@@ -27,11 +28,28 @@ const SAVE_DEBOUNCE_MS = 300;
 
 /** 装饰 span 的落盘形态：data-sue 标记 + 完整的 inline style */
 const DECORATED_UNDERLINE = /<span data-sue="u"[^>]*text-decoration-style: wavy[^>]*>/;
+const DECORATED_UNDERLINE_DOTTED = /<span data-sue="u"[^>]*text-decoration-style: dotted[^>]*>/;
 
 /** 单块选区：一个只有纯文本的段落 */
 const SINGLE_BLOCK_HTML = `<p data-type="text" data-node-id="${BLOCK_A}">hello</p>`;
 /** 双块选区：两个并列段落，用来验证「每个受影响块独立保存一次」 */
 const TWO_BLOCKS_HTML = SINGLE_BLOCK_HTML + `<p data-type="text" data-node-id="${BLOCK_B}">world</p>`;
+
+/**
+ * 表格：可编辑区域是 TD，所属块却是外面那张表。
+ * 撤销把块的 outerHTML 整体换掉时，TD 连同它里面的块一起脱管，是最容易拿着旧引用继续改的地方。
+ */
+const TABLE_ID = "20261003220000-t0";
+const TABLE_HTML = `<div data-type="NodeTable" data-node-id="${TABLE_ID}"><table><tbody><tr>` +
+    `<td><p data-type="text" data-node-id="${BLOCK_A}">cell one</p></td>` +
+    `<td><p data-type="text" data-node-id="${BLOCK_B}">cell two</p></td>` +
+    "</tr></tbody></table></div>";
+
+/** callout：标题区是可编辑区域，所属块是那个 callout，标题本身不带 data-node-id */
+const CALLOUT_ID = "20261003220000-c0";
+const CALLOUT_HTML = `<div data-type="NodeCallout" data-node-id="${CALLOUT_ID}">` +
+    '<div class="callout-info"><div class="callout-title">title text</div></div>' +
+    `<p data-type="text" data-node-id="${BLOCK_A}">body text</p></div>`;
 
 /** 已装饰的块：外层上划线、内层下划线，正是 composePair 的嵌套输出 */
 const NESTED_CSS = {
@@ -95,11 +113,24 @@ const createFixture = (options = {}) => {
         },
     };
 
+    /**
+     * i18n 换成记录用的 Proxy：插件读哪个键就被记下哪个，拿到的是固定记号。
+     * 断言因此能对着字面量写，不必从被测代码读的同一份 JSON 里取期望值 ——
+     * 那样只要键被改名或删掉，两边一起变成 undefined，断言照样通过。
+     */
+    const requestedI18NKeys = [];
+    const recordingI18n = new Proxy({}, {
+        get: (target, key) => {
+            requestedI18NKeys.push(String(key));
+            return `⟦${String(key)}⟧`;
+        },
+    });
+
     /** Plugin 基类桩：只提供 src/index.ts 真正用到的那几个成员 */
     class Plugin {
         constructor() {
             this.name = "siyuan-underline-enhancement";
-            this.i18n = i18n;
+            this.i18n = recordingI18n;
             this.data = options.data ?? {};
             this.eventBus = eventBus;
         }
@@ -210,6 +241,9 @@ const createFixture = (options = {}) => {
         return range;
     };
 
+    /** 单个元素内 [start, end) 字符偏移的选区 */
+    const offsetRange = (element, start, end) => rangeBetween(element, start, element, end);
+
     const block = (blockId) => document.querySelector(`[data-node-id="${blockId}"]`);
     const blockHTML = (blockId) => block(blockId).outerHTML;
     /** 默认选区：整段选中唯一的那个块 */
@@ -219,12 +253,38 @@ const createFixture = (options = {}) => {
     };
     /** 跨块选区：从第一个块开头选到第二个块结尾 */
     const crossRange = () => rangeBetween(block(BLOCK_A), 0, block(BLOCK_B), block(BLOCK_B).textContent.length);
+    /** 表格单元格内的选区；可编辑区域是 TD，落盘的块却是外面那张表 */
+    const cellRange = (blockId) => {
+        const element = block(blockId);
+        return rangeBetween(element, 0, element, element.textContent.length);
+    };
 
-    const clickToolbarItem = (protyle = protyleOf(singleRange())) => {
+    const toolbarItem = () => {
         const item = calls.toolbarItems[calls.toolbarItems.length - 1];
         assert.ok(item, "工具栏项应当已注册");
-        item.click(protyle);
+        return item;
+    };
+
+    const clickToolbarItem = (protyle = protyleOf(singleRange())) => {
+        toolbarItem().click(protyle);
         return protyle;
+    };
+
+    /**
+     * 按思源的绑定方式从浮动工具栏的按钮上打开面板。
+     *
+     * ToolbarItem 只 preventDefault，不 stopPropagation，事件照样冒泡到 document；
+     * 面板的「点击面板外关闭」就挂在 document 上，同一次点击不能把刚开的面板关掉。
+     */
+    const clickToolbarButton = (protyle = protyleOf(singleRange())) => {
+        const button = document.createElement("button");
+        document.getElementById("anchor").appendChild(button);
+        button.addEventListener("click", (event) => {
+            event.preventDefault();
+            toolbarItem().click(protyle);
+        });
+        button.dispatchEvent(new window.MouseEvent("click", {bubbles: true}));
+        return button;
     };
 
     const panelElement = () => document.querySelector("[data-sue-panel]");
@@ -251,9 +311,13 @@ const createFixture = (options = {}) => {
         protyleOf,
         singleRange,
         crossRange,
+        cellRange,
+        offsetRange,
         block,
         blockHTML,
+        toolbarItem,
         clickToolbarItem,
+        clickToolbarButton,
         panelElement,
         sectionOf,
         switchOf,
@@ -264,6 +328,7 @@ const createFixture = (options = {}) => {
         pressed,
         click,
         toggle,
+        requestedI18NKeys: () => [...new Set(requestedI18NKeys)],
         respondWith: (...queued) => {
             responses = responses.concat(queued);
         },
@@ -280,7 +345,7 @@ test("onload 注入图标并注册带稳定标识的工具栏项", () => {
     const [item] = calls.toolbarItems;
     assert.equal(item.name, TOOLBAR_ITEM_NAME);
     assert.equal(item.icon, ICON_ID);
-    assert.equal(item.tip, i18n.underlineEnhancement);
+    assert.equal(item.tip, "⟦underlineEnhancement⟧");
     assert.equal(item.tipPosition, "n");
     assert.equal(typeof item.click, "function");
 });
@@ -351,7 +416,30 @@ test("保存失败时弹提示", async () => {
     f.clickToolbarItem();
     f.click(f.styleSwatchOf("underline", "wavy"));
     await settle();
-    assert.deepEqual(f.calls.messages, [i18n.saveFailed]);
+    assert.deepEqual(f.calls.messages, ["⟦saveFailed⟧"]);
+});
+
+// ------------------------------------------------------------------ 文案
+
+test("插件用到的每个 i18n 键在两种语言的真实文件里都存在", async () => {
+    // 键清单从插件自己问出来：i18n 换成记录用的 Proxy，插件取哪个键就被记下哪个
+    const f = createFixture();
+    f.respondWith(FAILED_RESPONSE);
+    f.plugin.onload();
+    await f.plugin.onLayoutReady();
+    f.clickToolbarItem();
+    f.click(f.styleSwatchOf("underline", "wavy"));
+    await settle();
+    const keys = f.requestedI18NKeys();
+    assert.ok(keys.includes("underlineEnhancement"), "工具栏提示应当取自 i18n");
+    assert.ok(keys.includes("saveFailed"), "保存失败提示应当取自 i18n");
+    for (const locale of ["zh-CN", "en"]) {
+        const table = readLocale(locale);
+        for (const key of keys) {
+            assert.equal(typeof table[key], "string", `${locale}.json 缺少插件用到的键 ${key}`);
+            assert.notEqual(table[key].trim(), "", `${locale}.json 的 ${key} 是空串，界面上会显示空白`);
+        }
+    }
 });
 
 test("清除装饰去掉两个方向的装饰，并把面板的选中态刷回来", async () => {
@@ -387,6 +475,63 @@ test("关掉再打开某个方向时沿用它上次的线型与颜色", () => {
     assert.equal(f.pressed(f.colorSwatchOf("underline", "#e5484d")), true);
 });
 
+test("从浮动工具栏的按钮点击打开面板时，同一次点击冒泡到 document 不能把面板关掉", () => {
+    const f = createFixture();
+    f.plugin.onload();
+    f.clickToolbarButton();
+    assert.ok(f.panelElement(), "面板应当在这次点击之后仍然留在文档里");
+    // 面板确实能用来改设置，不是一个开了就被回收的空壳
+    f.click(f.styleSwatchOf("underline", "wavy"));
+    assert.match(f.blockHTML(BLOCK_A), DECORATED_UNDERLINE);
+});
+
+test("对照组：表格单元格里连续改两次设置，两次都落到文档上", async () => {
+    const f = createFixture({blocks: TABLE_HTML});
+    f.plugin.onload();
+    f.clickToolbarItem(f.protyleOf(f.cellRange(BLOCK_A)));
+    f.click(f.styleSwatchOf("underline", "wavy"));
+    await settle();
+    f.click(f.styleSwatchOf("underline", "dotted"));
+    assert.match(f.blockHTML(BLOCK_A), DECORATED_UNDERLINE_DOTTED);
+});
+
+test("表格单元格里撤销之后再改设置，装饰仍然落在文档上", async () => {
+    const f = createFixture({blocks: TABLE_HTML});
+    f.plugin.onload();
+    f.clickToolbarItem(f.protyleOf(f.cellRange(BLOCK_A)));
+    f.click(f.styleSwatchOf("underline", "wavy"));
+    await settle();
+    assert.match(f.blockHTML(BLOCK_A), DECORATED_UNDERLINE);
+    f.click(f.actionButton("undo"));
+    await tick();
+    assert.equal(f.blockHTML(BLOCK_A).includes("data-sue"), false);
+    // 撤销换掉的是整张表的 HTML：这一组必须重新认领到文档里的单元格，否则改的是脱管的节点
+    f.click(f.styleSwatchOf("underline", "dotted"));
+    assert.match(f.blockHTML(BLOCK_A), DECORATED_UNDERLINE_DOTTED);
+    await settle();
+    const last = f.posts[f.posts.length - 1];
+    assert.equal(last.data.id, TABLE_ID, "单元格的改动按所属块落盘");
+    // 落盘的内容必须就是当前文档里的内容：拿着脱管节点发出去的是改动前的旧 HTML
+    assert.equal(last.data.data, f.block(TABLE_ID).outerHTML);
+});
+
+test("callout 标题区撤销之后再改设置，装饰仍然落在标题上", async () => {
+    const f = createFixture({blocks: CALLOUT_HTML});
+    const title = () => f.document.querySelector(".callout-title");
+    f.plugin.onload();
+    f.clickToolbarItem(f.protyleOf(f.offsetRange(title(), 0, title().textContent.length)));
+    f.click(f.styleSwatchOf("underline", "wavy"));
+    await settle();
+    assert.match(title().outerHTML, DECORATED_UNDERLINE);
+    f.click(f.actionButton("undo"));
+    await tick();
+    assert.equal(title().outerHTML.includes("data-sue"), false);
+    // 标题区是新块里的哪一个由 dom.ts 按位置判定：认错了就会去装饰正文段落
+    f.click(f.styleSwatchOf("underline", "dotted"));
+    assert.match(title().outerHTML, DECORATED_UNDERLINE_DOTTED);
+    assert.equal(f.blockHTML(BLOCK_A).includes("data-sue"), false);
+});
+
 test("撤销把块换回改动前的样子，并按文档里的真实状态刷新面板", async () => {
     const f = createFixture();
     f.plugin.onload();
@@ -419,6 +564,20 @@ test("打开面板时按选区里已有的 data-sue 装饰回填两个方向", (
     assert.equal(f.switchOf("overline").checked, true);
     assert.equal(f.pressed(f.styleSwatchOf("overline", "dotted")), true);
     assert.equal(f.pressed(f.colorSwatchOf("overline", "#0090ff")), true);
+});
+
+test("落在选区之外的装饰不参与回填", () => {
+    // 装饰在「decorated」那一段，选区只覆盖前面的「plain 」
+    const html = `<p data-type="text" data-node-id="${BLOCK_A}">plain ` +
+        `<span data-sue="u" style="${NESTED_CSS.underline}">decorated</span> tail</p>`;
+    const f = createFixture({blocks: html});
+    f.plugin.onload();
+    f.clickToolbarItem(f.protyleOf(f.offsetRange(f.block(BLOCK_A), 0, 6)));
+    // 面板显示的是默认值：选中的这段本来就没有装饰
+    assert.equal(f.pressed(f.styleSwatchOf("underline", "solid")), true);
+    assert.equal(f.pressed(f.styleSwatchOf("underline", "wavy")), false);
+    assert.equal(f.pressed(f.followSwatchOf("underline")), true);
+    assert.equal(f.switchOf("overline").checked, false);
 });
 
 test("loadData 读回的配置过白名单后，作为没有装饰的选区的面板初值", async () => {

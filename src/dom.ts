@@ -21,6 +21,9 @@ export interface IEditableGroup {
 /** 装饰 span 的标记属性；值为下划线 u、上划线 o、两者合并 b */
 const MARK_ATTRIBUTE = "data-sue";
 
+/** 一组装饰方向最多对应两个 span（外层上划线、内层下划线），读取时按这个上限截断 */
+const MAX_PAIR_SPANS = 2;
+
 /** 思源的零宽空格占位符 */
 const ZWSP = "\u200b";
 
@@ -396,6 +399,75 @@ export const restoreOffsets = (captured: Array<[HTMLElement, number, number]>): 
     last[0].focus();
     selection.removeAllRanges();
     selection.addRange(range);
+};
+
+/**
+ * 读出与 [start, end) 这段字符相交的装饰 span 的 style，按文档顺序、最多两个。
+ *
+ * 范围用区域内的字符偏移表达，与 applySpansIn 同一坐标系：只看「区域内有没有装饰」是不够的，
+ * 一个块里装饰可能整个落在选区之外，那种情况下打开面板不该把它当成当前选区的样式。
+ * 两个上限对应一对方向（外层上划线、内层下划线，或合并后的单个 span）。
+ */
+export const readDecorationStylesIn = (
+    editableElement: HTMLElement,
+    start: number,
+    end: number,
+): string[] => {
+    const range = end > start ? createRangeIn(editableElement, start, end) : null;
+    const spans = editableElement.querySelectorAll(`[${MARK_ATTRIBUTE}]`);
+    const styles: string[] = [];
+    for (const span of spans) {
+        if (range !== null && !range.intersectsNode(span)) {
+            continue;
+        }
+        styles.push(span.getAttribute("style"));
+        if (styles.length === MAX_PAIR_SPANS) {
+            break;
+        }
+    }
+    return styles;
+};
+
+/**
+ * 块 HTML 被整体换过之后，在新块里按同样的位置找回可编辑区域。
+ *
+ * 换掉的只是本插件写下的装饰 span（撤销的前后两版 HTML 就差这些 span），块的结构没有变，
+ * 因此「同一个单元格 / 同一个标题区」可以按位置精确对上，而不是靠猜或者干脆退回块自身：
+ * 退回块自身在表格里是危险的，偏移是相对单元格算的，套到整张表上会裹出一段跨单元格的装饰。
+ *
+ * 区域还连着文档时原样返回；新块里找不到对应位置时也退回块自身，
+ * 那意味着区域内没有更细的层级，块自身就是可编辑区域（普通段落即是）。
+ */
+export const reclaimEditableElement = (editableElement: HTMLElement, blockElement: HTMLElement): HTMLElement => {
+    if (editableElement === blockElement) {
+        return blockElement;
+    }
+    if (editableElement?.isConnected === true) {
+        return editableElement;
+    }
+    // 旧区域已经脱管，但它自己还带着旧的祖先链，从那里算出位置即可
+    const oldBlock = editableElement.closest(BLOCK_SELECTOR);
+    if (oldBlock === null) {
+        return blockElement;
+    }
+    // 单元格：按「第几行第几格」在新块里找回同一个格子
+    const cell = editableElement.closest(CELL_SELECTOR);
+    if (cell !== null) {
+        // TD 的父元素就是 TR；querySelectorAll("tr") 的返回类型更窄，这里补一次断言而不是改判定
+        const row = cell.parentElement as HTMLTableRowElement;
+        const rowIndex = Array.from(oldBlock.querySelectorAll("tr")).indexOf(row);
+        const cellIndex = Array.from(row?.children ?? []).indexOf(cell);
+        const rows = Array.from(blockElement.querySelectorAll("tr"));
+        const found = rows[rowIndex]?.children[cellIndex] as HTMLElement;
+        return found ?? blockElement;
+    }
+    // 标题区：按出现次序找回同一个标题
+    const titleIndex = Array.from(oldBlock.querySelectorAll(TITLE_SELECTOR)).indexOf(editableElement);
+    if (titleIndex !== -1) {
+        const titles = Array.from(blockElement.querySelectorAll(TITLE_SELECTOR));
+        return (titles[titleIndex] as HTMLElement) ?? blockElement;
+    }
+    return blockElement;
 };
 
 /**
