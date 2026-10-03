@@ -8,6 +8,7 @@ import {
 
 const BLOCK_A = "20261003220000-a1";
 const BLOCK_B = "20261003220000-b2";
+const BLOCK_C = "20261003220000-c3";
 // 带双引号的块 id：拼进属性选择器字面量会直接让选择器失效，验证按 id 现查没有走那条路
 const BLOCK_QUOTED = '20261003220000-"q1"';
 
@@ -116,6 +117,12 @@ const createFixture = () => {
 /** vm realm 里造出来的实参要搬回宿主 realm 才能做严格比较 */
 const callOf = (call) => toHost({url: call.url, data: call.data});
 
+/**
+ * 等防抖路径上的 Promise 落定。saveBlockDOM 与桩都只在微任务里推进，让出一次事件循环就够了；
+ * 这里不用假时钟推进——那只能推进定时器，推进不了微任务队列。
+ */
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+
 // ---------------------------------------------------------------- saveBlockDOM
 
 test("saveBlockDOM posts the block outerHTML verbatim with dataType dom", async () => {
@@ -171,7 +178,32 @@ test("saveBlockDOM reports failure instead of rejecting when the request never r
 
 // ---------------------------------------------------------------- createDebouncedSaver
 
-test("createDebouncedSaver collapses a burst of previews into one request carrying the newest block", () => {
+test("createDebouncedSaver sends every pending block separately inside one window", () => {
+    const {module, mount, server, clock, close} = createFixture();
+    const saver = module.createDebouncedSaver(300);
+    // 跨三段加装饰是最常见的用法，设计稿要求「每个受影响块独立保存一次」：
+    // 单槽位只会记下最后一个块，前两个块的装饰只留在屏幕上，一重载就没了
+    const [first, second, third] = mount(blockHTML(BLOCK_A, "a"), blockHTML(BLOCK_B, "b"), blockHTML(BLOCK_C, "c"));
+
+    saver.save(BLOCK_A, first);
+    saver.save(BLOCK_B, second);
+    saver.save(BLOCK_C, third);
+    clock.advance(300);
+
+    assert.equal(server.calls.length, 3, "每个受影响块都要独立发一次，少发就是装饰只留在屏幕上");
+    assert.deepEqual(
+        server.calls.map((call) => callOf(call).data),
+        [
+            {id: BLOCK_A, dataType: "dom", data: first.outerHTML},
+            {id: BLOCK_B, dataType: "dom", data: second.outerHTML},
+            {id: BLOCK_C, dataType: "dom", data: third.outerHTML},
+        ],
+        "每个请求都要带着自己那个块的 outerHTML，不能串块",
+    );
+    close();
+});
+
+test("createDebouncedSaver collapses a burst of previews of one block into one request with the newest element", () => {
     const {module, mount, server, clock, close} = createFixture();
     const saver = module.createDebouncedSaver(300);
     // 指针扫过色板时思源可能已重渲染过块，save 拿到的是一个个不同的元素实例
@@ -179,15 +211,15 @@ test("createDebouncedSaver collapses a burst of previews into one request carryi
     const [second] = mount(blockHTML(BLOCK_A, "B"));
     const [third] = mount(blockHTML(BLOCK_A, "C"));
 
-    saver.save(first);
-    saver.save(second);
-    saver.save(third);
+    saver.save(BLOCK_A, first);
+    saver.save(BLOCK_A, second);
+    saver.save(BLOCK_A, third);
     clock.advance(299);
     assert.equal(server.calls.length, 0, "窗口未到不能发请求");
 
     clock.advance(1);
 
-    assert.equal(server.calls.length, 1, "一串连击只应合并成一次请求");
+    assert.equal(server.calls.length, 1, "同一个块的一串连击只应合并成一次请求");
     // 防抖若留住首个实参，这里发出去的就是已经过期的 first，界面是 C 而磁盘上还停在 A
     assert.equal(callOf(server.calls[0]).data.data, third.outerHTML, "必须发最后一次调用的实参");
     assert.notEqual(callOf(server.calls[0]).data.data, first.outerHTML);
@@ -195,20 +227,76 @@ test("createDebouncedSaver collapses a burst of previews into one request carryi
     close();
 });
 
-test("createDebouncedSaver flush sends the newest block at once instead of waiting out the window", () => {
+test("createDebouncedSaver reports a failed block through onError and still sends the others", async () => {
+    const {module, mount, server, clock, close} = createFixture();
+    const reported = [];
+    const saver = module.createDebouncedSaver(300, {onError: (blockId) => reported.push(blockId)});
+    const [first, second] = mount(blockHTML(BLOCK_A, "a"), blockHTML(BLOCK_B, "b"));
+    // 只读笔记本上整批都存不进去，而界面上看不出任何差别：失败必须能上报给调用方去弹提示
+    const refused = {code: -1, msg: "read-only", data: null};
+    server.respondWith(refused, refused);
+
+    saver.save(BLOCK_A, first);
+    saver.save(BLOCK_B, second);
+    clock.advance(300);
+    await settle();
+
+    assert.equal(server.calls.length, 2, "一个块保存失败不能让同批次的其他块少发一次");
+    assert.deepEqual(reported, [BLOCK_A, BLOCK_B], "失败必须带着块 id 上报，调用方才知道提示的是哪个块");
+    close();
+});
+
+test("createDebouncedSaver keeps going when the onError callback itself throws", async () => {
+    const {module, mount, server, clock, close} = createFixture();
+    const reported = [];
+    const saver = module.createDebouncedSaver(300, {
+        onError: (blockId) => {
+            reported.push(blockId);
+            if (blockId === BLOCK_A) {
+                throw new Error("面板已经卸载，回调无处可用");
+            }
+        },
+    });
+    const [first, second] = mount(blockHTML(BLOCK_A, "a"), blockHTML(BLOCK_B, "b"));
+    const refused = {code: -1, msg: "read-only", data: null};
+    server.respondWith(refused, refused);
+
+    saver.save(BLOCK_A, first);
+    saver.save(BLOCK_B, second);
+    clock.advance(300);
+    await settle();
+
+    assert.deepEqual(reported, [BLOCK_A, BLOCK_B], "回调抛错也要继续上报后面的块，不能让一次提示毁掉整批保存");
+    assert.equal(server.calls.length, 2);
+    close();
+});
+
+test("createDebouncedSaver does not need onError to save", () => {
     const {module, mount, server, clock, close} = createFixture();
     const saver = module.createDebouncedSaver(300);
-    const [first] = mount(blockHTML(BLOCK_A, "A"));
-    const [second] = mount(blockHTML(BLOCK_A, "B"));
+    const [block] = mount(blockHTML(BLOCK_A, "a"));
+    server.respondWith({code: -1, msg: "read-only", data: null});
 
-    saver.save(first);
-    saver.save(second);
+    saver.save(BLOCK_A, block);
+    clock.advance(300);
+
+    assert.equal(server.calls.length, 1, "没有 onError 时保存照发，只是不上报失败");
+    close();
+});
+
+test("createDebouncedSaver flush sends every pending block at once instead of waiting out the window", () => {
+    const {module, mount, server, clock, close} = createFixture();
+    const saver = module.createDebouncedSaver(300);
+    const [first, second] = mount(blockHTML(BLOCK_A, "a"), blockHTML(BLOCK_B, "b"));
+
+    saver.save(BLOCK_A, first);
+    saver.save(BLOCK_B, second);
     saver.flush();
 
-    assert.equal(server.calls.length, 1, "面板关闭时的最后一次保存不能等窗口");
-    assert.equal(callOf(server.calls[0]).data.data, second.outerHTML);
+    assert.equal(server.calls.length, 2, "面板关闭时的最后一次保存不能等窗口");
+    assert.deepEqual(server.calls.map((call) => callOf(call).data.id), [BLOCK_A, BLOCK_B]);
     clock.advance(300);
-    assert.equal(server.calls.length, 1, "已经 flush 出去的内容不能再补发一次");
+    assert.equal(server.calls.length, 2, "已经 flush 出去的内容不能再补发一次");
     close();
 });
 
@@ -224,17 +312,44 @@ test("createDebouncedSaver flush does nothing when no save is pending", () => {
     close();
 });
 
-test("createDebouncedSaver cancel drops both the pending block and its timer", () => {
+test("createDebouncedSaver cancel drops the pending block itself, not just its timer", () => {
     const {module, mount, server, clock, close} = createFixture();
     const saver = module.createDebouncedSaver(300);
     const [block] = mount(blockHTML(BLOCK_A, "A"));
 
-    saver.save(block);
-    saver.cancel();
-    clock.advance(1000);
+    saver.save(BLOCK_A, block);
+    saver.cancel(BLOCK_A);
+    saver.flush();
 
+    assert.equal(server.calls.length, 0, "取消的是待保存内容本身：只清定时器的话，flush 仍会把这次保存发出去");
+    clock.advance(1000);
     assert.equal(server.calls.length, 0);
     assert.equal(clock.pending(), 0, "取消必须把定时器一并清掉，不能让它空跑到点");
+    close();
+});
+
+test("createDebouncedSaver cancel clears only the named block and cancel() clears them all", () => {
+    const {module, mount, server, clock, close} = createFixture();
+    const saver = module.createDebouncedSaver(300);
+    const [first, second, third] = mount(blockHTML(BLOCK_A, "a"), blockHTML(BLOCK_B, "b"), blockHTML(BLOCK_C, "c"));
+
+    saver.save(BLOCK_A, first);
+    saver.save(BLOCK_B, second);
+    saver.save(BLOCK_C, third);
+    saver.cancel(BLOCK_B);
+    saver.flush();
+
+    assert.deepEqual(server.calls.map((call) => callOf(call).data.id), [BLOCK_A, BLOCK_C], "按 id 取消不能牵连别的块");
+
+    const [fourth, fifth] = mount(blockHTML(BLOCK_A, "a2"), blockHTML(BLOCK_C, "c2"));
+    saver.save(BLOCK_A, fourth);
+    saver.save(BLOCK_C, fifth);
+    saver.cancel();
+    saver.flush();
+
+    assert.equal(server.calls.length, 2, "不带参数的取消要清掉全部待保存内容");
+    clock.advance(1000);
+    assert.equal(server.calls.length, 2);
     close();
 });
 

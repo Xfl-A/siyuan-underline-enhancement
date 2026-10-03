@@ -18,12 +18,18 @@ export interface IChangeEntry {
 
 /** 防抖保存器的接口，由 createDebouncedSaver 返回 */
 export interface IDebouncedSaver {
-    /** 记下这次要保存的块；窗口内的后续调用只推迟发送，不覆盖已记下的块 */
-    save: (blockElement: HTMLElement) => void;
-    /** 立刻把记下的块发出去（面板关闭时用）；没有待保存内容时什么也不做 */
+    /** 记下这个块待保存；同一个块重复调用只推迟发送，并保留最新一次拿到的元素 */
+    save: (blockId: string, blockElement: HTMLElement) => void;
+    /** 立刻把全部待保存的块发出去（面板关闭时用）；没有待保存内容时什么也不做 */
     flush: () => void;
-    /** 丢弃记下的块与定时器 */
-    cancel: () => void;
+    /** 丢弃待保存的块；给出 blockId 时只丢该块，不给则全丢 */
+    cancel: (blockId?: string) => void;
+}
+
+/** createDebouncedSaver 的可选开关 */
+export interface IDebouncedSaverOptions {
+    /** 某个块保存失败时回调，参数是块 id；面板据此弹 showMessage */
+    onError?: (blockId: string) => void;
 }
 
 /** 保存块的接口 */
@@ -44,7 +50,7 @@ const changeStack: IChangeEntry[] = [];
  * 撤销栈只存 HTML 字符串，不持有 DOM 引用：块随时可能被思源重渲染，攥着旧节点只会拿到已经脱管的对象。
  * 这里逐个比对属性值而不是拼属性选择器：块 id 里一旦出现引号或反斜杠，选择器字面量会直接抛错或查不到。
  */
-const findBlockElement = (blockId: string): HTMLElement => {
+const findBlockElement = (blockId: string): HTMLElement | null => {
     const blocks = document.querySelectorAll(`[${NODE_ID_ATTRIBUTE}]`);
     for (let i = 0; i < blocks.length; i++) {
         const element = blocks[i];
@@ -65,7 +71,7 @@ const postBlockDOM = async (blockId: string, html: string): Promise<boolean> => 
     try {
         const result = await fetchSyncPost(UPDATE_BLOCK_API, {id: blockId, dataType: "dom", data: html});
         return result?.code === 0;
-    } catch (error) {
+    } catch {
         return false;
     }
 };
@@ -127,15 +133,19 @@ export const undoLastChange = async (): Promise<boolean> => {
 };
 
 /**
- * 造一个防抖保存器：窗口内的连续调用只发最后一次。
+ * 造一个防抖保存器：一个窗口内的连续调用合并成一批，每个受影响块各发一次。
  *
- * 面板的实时预览会以毫秒级连续触发（指针扫过色板就是如此），因此记下的必须是**最后一次**调用的块：
- * 留住首个实参的话，最后一次保存就被丢掉，界面上是 B 颜色而磁盘上还停在 A 颜色。
- * 记的是块元素而不是它的 HTML 快照，思源重渲染后旧快照就是过期数据。
+ * 设计稿要求「每个受影响块独立保存一次」，所以待保存的是一张按块 id 记账的表而不是单个槽位：
+ * 跨三段加装饰会连着 save 三个块，单槽位只会记下最后一个，前两个块的装饰只留在屏幕上。
+ *
+ * 同一个块在窗口内被反复 save 时保留**最新一次**的元素：面板实时预览会以毫秒级连续触发
+ * （指针扫过色板就是如此），留住首个实参的话最后一次保存就被丢掉，界面是 B 颜色而磁盘上还停在 A 颜色。
+ * 记的是块元素而不是 HTML 快照，思源重渲染后旧快照就是过期数据。
  */
-export const createDebouncedSaver = (delay: number): IDebouncedSaver => {
-    let timer: number = null;
-    let pendingBlock: HTMLElement = null;
+export const createDebouncedSaver = (delay: number, options: IDebouncedSaverOptions = {}): IDebouncedSaver => {
+    const {onError} = options;
+    let timer: number | null = null;
+    const pendingBlocks = new Map<string, HTMLElement>();
 
     const stopTimer = (): void => {
         if (timer !== null) {
@@ -144,25 +154,50 @@ export const createDebouncedSaver = (delay: number): IDebouncedSaver => {
         }
     };
 
+    /** 保存失败时通知调用方；回调是调用方的事，它抛错也不能让同批次的其他块少发一次 */
+    const reportFailure = (blockId: string): void => {
+        if (onError === undefined) {
+            return;
+        }
+        try {
+            onError(blockId);
+        } catch {
+            // 面板已经卸载之类的情况，提示发不出去就算了，保存本身不该因此中断
+        }
+    };
+
     const send = (): void => {
         stopTimer();
-        const blockElement = pendingBlock;
-        pendingBlock = null;
-        if (blockElement !== null) {
-            saveBlockDOM(blockElement);
+        // 先整体取走再发：saveBlockDOM 是异步的，边发边清会让回调期间新到的 save 被误删
+        const batch = Array.from(pendingBlocks);
+        pendingBlocks.clear();
+        for (const [blockId, blockElement] of batch) {
+            // 两个分支都收敛到 reportFailure：saveBlockDOM 正常不会 reject，真 reject 也算保存失败
+            saveBlockDOM(blockElement).then((saved) => {
+                if (!saved) {
+                    reportFailure(blockId);
+                }
+            }, () => {
+                reportFailure(blockId);
+            });
         }
     };
 
     return {
-        save: (blockElement: HTMLElement): void => {
-            pendingBlock = blockElement;
+        save: (blockId: string, blockElement: HTMLElement): void => {
+            pendingBlocks.set(blockId, blockElement);
             stopTimer();
             timer = setTimeout(send, delay);
         },
         flush: send,
-        cancel: (): void => {
-            stopTimer();
-            pendingBlock = null;
+        cancel: (blockId?: string): void => {
+            if (blockId === undefined) {
+                stopTimer();
+                pendingBlocks.clear();
+                return;
+            }
+            // 只丢这一个块，定时器留给其余块；表空了 send 到点也发不出什么
+            pendingBlocks.delete(blockId);
         },
     };
 };
