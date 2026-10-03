@@ -1,0 +1,21 @@
+{
+  "name": "siyuan-underline-enhancement",
+  "author": "your-name",
+  "url": "https://github.com/your-name/siyuan-underline-enhancement",
+  "version": "0.1.0",
+  "minAppVersion": "3.8.6",
+  "kernels": ["all"],
+  "backends": ["all"],
+  "frontends": ["all"],
+  "disabledInPublish": false,
+  "publish": { "resources": [], "data": [] },
+  "displayName": { "default": "Underline Enhancement", "zh-CN": "下划线增强" },
+  "description": {
+    "default": "Configure underline and overline line styles and colors from the editor floating toolbar.",
+    "zh-CN": "在编辑器浮动工具栏中分别设置下划线与上划线的线型和颜色。"
+  },
+  "readme": { "default": "README.md", "zh-CN": "README.zh-CN.md" },
+  "icon": "icon.png",
+  "preview": "preview.png",
+  "keywords": ["下划线", "上划线", "线型", "编辑器", "underline", "overline", "decoration", "editor"]
+}

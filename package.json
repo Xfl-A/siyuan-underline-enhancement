@@ -1,0 +1,43 @@
+{
+  "name": "siyuan-underline-enhancement",
+  "version": "0.1.0",
+  "description": "A SiYuan plugin that configures underline and overline line styles and colors from the editor floating toolbar",
+  "main": ".src/index.js",
+  "scripts": {
+    "format": "dprint fmt",
+    "format:check": "dprint check",
+    "lint": "eslint . --fix --cache",
+    "test": "node --test tests/*.test.mjs",
+    "dev": "webpack --config webpack.config.js --mode development",
+    "build": "webpack --config webpack.config.js --mode production"
+  },
+  "keywords": [],
+  "author": "your-name",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "^3.3.5",
+    "@eslint/js": "^10.0.1",
+    "@typescript-eslint/eslint-plugin": "^8.60.1",
+    "@typescript-eslint/parser": "^8.60.1",
+    "copy-webpack-plugin": "^14.0.0",
+    "css-loader": "^7.1.4",
+    "dprint": "latest",
+    "esbuild-loader": "^4.5.0",
+    "eslint": "^10.4.1",
+    "globals": "^17.6.0",
+    "jsdom": "^26.0.0",
+    "mini-css-extract-plugin": "^2.10.2",
+    "npm-run-all": "^4.1.5",
+    "sass": "^1.100.0",
+    "sass-loader": "^17.0.0",
+    "siyuan": "^1.2.8",
+    "tslib": "^2.8.1",
+    "typescript": "^6.0.3",
+    "webpack": "^5.107.2",
+    "webpack-cli": "^7.0.3",
+    "zip-webpack-plugin": "^4.0.3"
+  }
+}

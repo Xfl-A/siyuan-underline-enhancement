@@ -1,0 +1,12 @@
+{
+  "underlineEnhancement": "下划线增强",
+  "underline": "下划线",
+  "overline": "上划线",
+  "lineStyle": "线型",
+  "color": "颜色",
+  "followTextColor": "跟随文字颜色",
+  "customColor": "自定义颜色",
+  "clearDecoration": "清除装饰",
+  "undo": "撤销",
+  "saveFailed": "装饰保存失败"
+}

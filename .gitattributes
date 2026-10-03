@@ -1,0 +1,6 @@
+# 统一以 LF 检出，与 dprint.json 的 newLineKind 保持一致，否则 Windows 上的
+# core.autocrlf=true 会把工作区文件改回 CRLF，导致 dprint check 误报未格式化。
+* text=auto eol=lf
+
+# 图片等二进制文件不参与换行符转换。
+*.png binary
