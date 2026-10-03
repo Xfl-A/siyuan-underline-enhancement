@@ -264,36 +264,71 @@ const unwrap = (node: Node): void => {
 };
 
 /**
+ * 区域内某个元素所占的字符区间 [start, end)；元素内没有文本节点时返回 null。
+ *
+ * 与 offsetIndexOf 出自同一张表，所以这里的偏移和 applySpansIn 用的偏移是同一个坐标系。
+ */
+const offsetsOfElement = (index: Map<Node, number>, element: Element): IOffsetRange => {
+    let start = Number.POSITIVE_INFINITY;
+    let end = Number.NEGATIVE_INFINITY;
+    for (const text of textNodesOf(element)) {
+        const base = index.get(text);
+        if (base === undefined) {
+            continue;
+        }
+        start = Math.min(start, base);
+        end = Math.max(end, base + text.data.length);
+    }
+    return end > start ? {start, end} : null;
+};
+
+/**
  * 区域内的装饰 span，文档顺序。
  *
- * 给出 range 时只保留与它相交的那些。range 为 null 表示「整块都算」，
- * 相交判定与读取样式（readDecorationStylesIn）走同一条 range，避免「面板读到的是选区内的装饰、
- * 剥的却是整块」这种自相矛盾。
+ * 给出范围时只保留与它真正重叠的那些，判定按字符偏移做：spanStart < end && spanEnd > start。
+ * 不用 Range.intersectsNode：那条谓词是不对称的 —— 范围终点与 span 起点相接不算相交（安全），
+ * 但范围起点与 span 终点相接**算**相交。于是「从一个装饰词之后开始选中」（点击词尾再 Shift+End，
+ * collectEditableGroups 丢掉零宽片段后起点落在后一个文本节点的偏移上）会把那块装饰当成在选区内：
+ * stripDecorationIn 把它解包，applySpansIn 不会再包回去，装饰就此从文档里消失并随这次保存落盘。
+ *
+ * 读样式（readDecorationStylesIn）走同一个判定，两者才能对同一段文字给出同一个答案。
+ * range 为 null 表示「整块都算」。
  */
-const decorationSpansIn = (editableElement: HTMLElement, range: Range | null): HTMLElement[] => {
+const decorationSpansIn = (editableElement: HTMLElement, range: IOffsetRange | null): HTMLElement[] => {
     const spans = Array.from(editableElement.querySelectorAll(`[${MARK_ATTRIBUTE}]`)) as HTMLElement[];
     if (range === null) {
         return spans;
     }
-    return spans.filter((span) => range.intersectsNode(span));
+    const index = offsetIndexOf(editableElement);
+    return spans.filter((span) => {
+        const offsets = offsetsOfElement(index, span);
+        // 一个字符都不占的空壳 span 没有可重叠的区间，剥它只会顺手丢掉解包残留之外的别的东西
+        return offsets !== null && offsets.start < range.end && offsets.end > range.start;
+    });
 };
 
 /**
  * 剥掉区域内的装饰 span，只改嵌套关系，不动一个字。
  *
- * 给出范围时只剥与 [start, end) 相交的 span：同一个块里的装饰可能整块落在选区之外，
+ * 给出范围时只剥与 [start, end) 真正重叠的 span：同一个块里的装饰可能整块落在选区之外，
  * 那是用户此前已经保存下来的另一处改动，按区域整块剥掉会把它从编辑器里删掉、并随
  * 这次保存一起落盘（审阅里复现的就是「先给一个词加线，再给同段另一个词加线」，
  * 前一次装饰无声消失）。范围用区域内字符偏移表达，与 applySpansIn 同一坐标系。
+ *
+ * 范围塌成一点或起止颠倒时直接返回：零宽范围不覆盖任何字符，一个装饰都不该动 ——
+ * 它与「没给范围」（整块清理）是两回事，混同就会把整块的装饰无声剥掉。
  *
  * 不给范围即整块清理。生产代码里没有任何地方需要它：面板的作用域始终是打开时记下的
  * 那个选区范围，「清除装饰」也是 applySpansIn(specs = [])，因此同样只清选区内的装饰。
  * 保留这个无范围形态是为了让「清掉整个区域」这件事仍然显式可写，而不是被顺手带出来。
  */
 export const stripDecorationIn = (editableElement: HTMLElement, offsets?: IOffsetRange): void => {
-    const range = offsets === undefined ? null : createRangeIn(editableElement, offsets.start, offsets.end);
+    // 零宽或颠倒的范围什么都不覆盖，与「没给范围」（整块清理）是两回事，不能混同
+    if (offsets !== undefined && offsets.end <= offsets.start) {
+        return;
+    }
     // 从最内层开始拆：内层搬走的子节点正是外层要接着搬的
-    const spans = decorationSpansIn(editableElement, range);
+    const spans = decorationSpansIn(editableElement, offsets ?? null);
     for (let i = spans.length - 1; i >= 0; i--) {
         unwrap(spans[i]);
     }
@@ -325,6 +360,13 @@ const locate = (editableElement: HTMLElement, offset: number): {node: Text; offs
  * 包裹时就会把整个 <strong> 复制进新 span、原地留一个空的 <strong>；外扩后它被整体搬走。
  * 外扩只认行内元素：爬过块级元素会把块内容包进 span，那是 span 放不下的非法标记。
  * 范围不会扩出可编辑区域。
+ *
+ * 两端认法不同，源头是 locate 的交界规则：偏移落在两个文本节点的交界上时归前一个节点的末尾，
+ * 因此端点正好压在交界上时，起止两端都会落在一个文本节点的末尾，都需要「在这个节点之后」的外扩。
+ * 旧实现只给终点认了这一侧，起点只能从节点开头外扩（按 locate 的规则那只在偏移为 0 时发生），
+ * 于是「从一个装饰词之后开始选中」的起点留在那块装饰最后一个文本节点的内部：
+ * extractContents 把它复制成一个空壳 span，并把整块装饰连同新装饰一起吞进去 ——
+ * 判相交时按字符偏移判对了，包裹时却又把它算进了范围内。
  */
 const expandBoundary = (
     editableElement: HTMLElement,
@@ -343,11 +385,14 @@ const expandBoundary = (
             break;
         }
         const isText = current.nodeType === Node.TEXT_NODE;
-        const edge = isEnd ? (isText ? (current as Text).length : current.childNodes.length) : 0;
-        if (position !== edge) {
+        const length = isText ? (current as Text).length : current.childNodes.length;
+        const before = position === 0;
+        // 两端都成立（空节点）时按「在它之前」处理，与既有行为一致
+        const after = !before && position === length;
+        if (!(isEnd ? after : before || after)) {
             break;
         }
-        position = Array.from(parent.childNodes).indexOf(current as ChildNode) + (isEnd ? 1 : 0);
+        position = Array.from(parent.childNodes).indexOf(current as ChildNode) + (after ? 1 : 0);
         current = parent;
     }
     return {node: current, offset: position};
@@ -422,7 +467,7 @@ const cleanupIn = (editableElement: HTMLElement): void => {
  * 在区域内按字符偏移包裹装饰 span。
  *
  * 顺序是「先剥后包」：剥 span 不改变 textContent，所以此时这些偏移仍指向同一批文字。
- * 只剥与 [start, end) 相交的旧装饰，落在范围之外的保持原样 —— 同一个块里的另一处装饰是用户
+ * 只剥与 [start, end) 真正重叠的旧装饰，落在范围之外的保持原样 —— 同一个块里的另一处装饰是用户
  * 此前已经保存好的改动，不该被这次设置顺带抹掉。
  * specs 与 composePair 一致、外层在前，因此从末尾向前包裹，落到 DOM 上的是外层 span 包着内层 span。
  * 空 specs 的语义是清除装饰（同样只清选区内的那部分）；空区间或区域内没有文本节点时什么也不包。
@@ -474,10 +519,12 @@ export const restoreOffsets = (captured: Array<[HTMLElement, number, number]>): 
 };
 
 /**
- * 读出与 [start, end) 这段字符相交的装饰 span 的 style，按文档顺序、最多两个。
+ * 读出与 [start, end) 这段字符真正重叠的装饰 span 的 style，按文档顺序、最多两个。
  *
  * 范围用区域内的字符偏移表达，与 applySpansIn 同一坐标系：只看「区域内有没有装饰」是不够的，
  * 一个块里装饰可能整个落在选区之外，那种情况下打开面板不该把它当成当前选区的样式。
+ * 重叠判定与剥（stripDecorationIn）走同一个 decorationSpansIn，两条路径不可能对同一段文字
+ * 给出相反的答案。
  * 两个上限对应一对方向（外层上划线、内层下划线，或合并后的单个 span）。
  */
 export const readDecorationStylesIn = (
@@ -485,7 +532,7 @@ export const readDecorationStylesIn = (
     start: number,
     end: number,
 ): string[] => {
-    const range = end > start ? createRangeIn(editableElement, start, end) : null;
+    const range: IOffsetRange = end > start ? {start, end} : null;
     const styles: string[] = [];
     for (const span of decorationSpansIn(editableElement, range)) {
         styles.push(span.getAttribute("style"));

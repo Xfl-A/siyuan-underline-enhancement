@@ -87,7 +87,7 @@ extracted straight into the plugin directory.
 2. Click the **Underline Enhancement** icon in that toolbar. The icon is part of every editor's toolbar; when
    the selection holds nothing to decorate — inside a code block, for instance — clicking it opens nothing.
 3. In the panel, set the **Underline** and the **Overline** section independently: switch, line style, color.
-4. Click **Clear decoration** to remove both directions, or **Undo** to step back one change.
+4. Click **Clear decoration** to remove both directions from the selection, or **Undo** to step back one change.
 5. Click outside the panel or press `Esc` to close it. The panel saves on close.
 
 The selection may span paragraphs, list items and table cells; each editable region is wrapped on its own.

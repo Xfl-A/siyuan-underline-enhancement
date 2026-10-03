@@ -12,6 +12,7 @@ const {
     captureOffsets,
     restoreOffsets,
     reclaimEditableElement,
+    readDecorationStylesIn,
     getEventName,
 } = module;
 
@@ -515,6 +516,27 @@ test("stripDecorationIn with a range leaves decoration outside that range untouc
     cleanup();
 });
 
+test("stripDecorationIn treats a collapsed or inverted range as no range at all", () => {
+    const cleanup = mount(editor(
+        `<p data-type="text" data-node-id="p1">plain ${markedSpan(DOTTED_CSS, "decorated")} tail</p>`,
+    ));
+    const paragraph = document.querySelector("p");
+    const before = paragraph.innerHTML;
+
+    // 零宽的字符范围在 DOM 上仍是一条真实 range：起点落在 "decorated" 末尾，
+    // 终点经端点外扩升到 <p> 里那个 span 之后的位置。Range.intersectsNode 判它相交，
+    // 于是这块装饰被无声剥掉。零宽范围不覆盖任何字符，一个装饰都不该动。
+    stripDecorationIn(paragraph, {start: 15, end: 15});
+
+    assert.equal(paragraph.innerHTML, before, "塌成一点的范围不该剥掉任何装饰");
+
+    stripDecorationIn(paragraph, {start: 8, end: 3});
+
+    assert.equal(paragraph.innerHTML, before, "起止颠倒的范围同样按「没有范围」处理");
+    assert.deepEqual(decorationsIn(paragraph), [{marker: "u", style: DOTTED_CSS, text: "decorated"}]);
+    cleanup();
+});
+
 // ---------------------------------------------------------------- applySpansIn
 
 test("applySpansIn wraps the selected text in one span and leaves the adjacent text out of it", () => {
@@ -729,6 +751,66 @@ test("applySpansIn restyles the selected range and keeps decoration elsewhere in
     cleanup();
 });
 
+test("applySpansIn keeps a decoration byte-identical when the range starts exactly where it ends", () => {
+    // 装饰 "decorated" 落在偏移 6..15：选区起点压在它末尾时，一个字都不该属于选区
+    const cleanup = mount(editor(
+        `<p data-type="text" data-node-id="p1">plain ${markedSpan(DOTTED_CSS, "decorated")} tail</p>
+        <p data-type="text" data-node-id="p2">plain ${markedSpan(DOTTED_CSS, "decorated")} tail</p>`,
+    ));
+    const [afterSpan, beforeSpan] = document.querySelectorAll("p");
+    const kept = markedSpan(DOTTED_CSS, "decorated");
+
+    applySpansIn(afterSpan, 15, 20, [underlineSpec(WAVY_CSS)]);
+
+    // 选区起点与装饰末尾相接：那块装饰是用户此前保存过的另一处改动，
+    // 剥掉它等于把它从文档里删掉，并随这次保存一起落盘（生产可达：装饰后紧跟的文字起选中）
+    assert.equal(
+        afterSpan.innerHTML,
+        `plain ${kept}${markedSpan(WAVY_CSS, " tail")}`,
+        "选区起点与装饰末尾相接时，那块装饰必须逐字节保留",
+    );
+    assert.deepEqual(decorationsIn(afterSpan), [
+        {marker: "u", style: DOTTED_CSS, text: "decorated"},
+        {marker: "u", style: WAVY_CSS, text: " tail"},
+    ]);
+
+    // 同一个边界从另一侧看：选区终点与装饰起点相接时，那块装饰落在范围之外，
+    // 既不被剥掉也不被新样式盖住。（上面那条 applySpansIn 用例覆盖了这一侧，这里作对称对照）
+    applySpansIn(beforeSpan, 0, 6, [underlineSpec(WAVY_CSS)]);
+
+    assert.equal(
+        beforeSpan.innerHTML,
+        `${markedSpan(WAVY_CSS, "plain ")}${kept} tail`,
+        "选区终点与装饰起点相接时，只改写选区本身",
+    );
+    assert.deepEqual(decorationsIn(beforeSpan), [
+        {marker: "u", style: WAVY_CSS, text: "plain "},
+        {marker: "u", style: DOTTED_CSS, text: "decorated"},
+    ]);
+    assert.equal(afterSpan.textContent, "plain decorated tail");
+    assert.equal(beforeSpan.textContent, "plain decorated tail");
+    cleanup();
+});
+
+test("applySpansIn still restyles a decoration that the range only partly overlaps", () => {
+    // 装饰落在偏移 6..15；两段选区各压住它的一半，都算与范围相交
+    const cleanup = mount(editor(
+        `<p data-type="text" data-node-id="p1">plain ${markedSpan(DOTTED_CSS, "decorated")} tail</p>
+        <p data-type="text" data-node-id="p2">plain ${markedSpan(DOTTED_CSS, "decorated")} tail</p>`,
+    ));
+    const [tailCut, headCut] = document.querySelectorAll("p");
+
+    applySpansIn(tailCut, 9, 20, [underlineSpec(WAVY_CSS)]);
+    applySpansIn(headCut, 0, 9, [underlineSpec(WAVY_CSS)]);
+
+    // 只擦掉相接处那一侧：装饰被新样式盖住，范围外的文字既不被拖进新 span、也不会被剥成裸文本
+    assert.deepEqual(decorationsIn(tailCut), [{marker: "u", style: WAVY_CSS, text: "orated tail"}]);
+    assert.deepEqual(decorationsIn(headCut), [{marker: "u", style: WAVY_CSS, text: "plain dec"}]);
+    assert.equal(tailCut.textContent, "plain decorated tail");
+    assert.equal(headCut.textContent, "plain decorated tail");
+    cleanup();
+});
+
 test("applySpansIn keeps every untouched decoration in a table cell that holds two decorated words", () => {
     const cleanup = mount(editor(
         `<table class="b3-table" data-type="blockTable" data-node-id="table1"><tbody><tr>
@@ -868,6 +950,24 @@ test("applySpansIn does nothing for an empty or inverted offset range", () => {
     applySpansIn(blank, 0, 5, [underlineSpec()]);
     assert.deepEqual(decorationsIn(blank), [], "块里没有文本节点时不该凭空造出 span");
     assert.equal(text.textContent, "abc");
+    cleanup();
+});
+
+// ---------------------------------------------------------------- readDecorationStylesIn
+
+test("readDecorationStylesIn reads what the selection really covers, at both boundaries", () => {
+    const cleanup = mount(editor(
+        `<p data-type="text" data-node-id="p1">plain ${markedSpan(DOTTED_CSS, "decorated")} tail</p>`,
+    ));
+    const paragraph = document.querySelector("p");
+
+    // 面板读到的是「选区内的装饰」：范围落在装饰之后就读不到它，而不是把整块里的装饰都算进来
+    assert.deepEqual(toHost(readDecorationStylesIn(paragraph, 15, 20)), [], "起点压在装饰末尾即不相交");
+    assert.deepEqual(toHost(readDecorationStylesIn(paragraph, 0, 6)), [], "终点压在装饰起点即不相交");
+    // 一侧重叠仍算相交；读与剥走的是同一条判定，两者不可能对同一段文字给出相反的答案
+    assert.deepEqual(toHost(readDecorationStylesIn(paragraph, 9, 15)), [DOTTED_CSS], "压住后半截算相交");
+    assert.deepEqual(toHost(readDecorationStylesIn(paragraph, 6, 12)), [DOTTED_CSS], "压住前半截算相交");
+    assert.deepEqual(toHost(readDecorationStylesIn(paragraph, 6, 15)), [DOTTED_CSS], "整段压在装饰上算相交");
     cleanup();
 });
 

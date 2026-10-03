@@ -177,24 +177,26 @@
 | 实际结果 | （待填）                                                                                                              |
 | 结论     | ☐ 通过　☐ 不通过                                                                                                      |
 
-## 13. 撤销：保存落盘并重载文档之后（桌面端）
+## 13. 撤销：内核重渲染把块 HTML 规范化之后（桌面端，本项刻意不刷新文档）
 
-| 项       | 内容                                                                                                              |
-| -------- | ----------------------------------------------------------------------------------------------------------------- |
-| 步骤     | 桌面端装饰一段文字 → 等保存完成 → **重新加载文档**（重开文档 / 刷新页面）→ 重新选中同一段 → 打开面板 → 点「撤销」 |
-| 预期结果 | 装饰被移除，文字一字未变                                                                                          |
-| 实际结果 | （待填）                                                                                                          |
-| 结论     | ☐ 通过　☐ 不通过　说明：按钮可用但点了没反应（见下方说明）                                                        |
+| 项       | 内容                                                                                                                                                               |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 步骤     | 桌面端装饰一段文字 → **保持面板开着、不刷新文档** → 在不输入任何字符的前提下让思源重渲染这个块（把光标点进这一段并用方向键来回移动、折叠再展开该块等）→ 点「撤销」 |
+| 预期结果 | 装饰被移除，文字一字未变。若按钮**仍是可点状态、点了却什么也不发生**，即为不通过（见下方说明）                                                                     |
+| 实际结果 | （待填）                                                                                                                                                           |
+| 结论     | ☐ 通过　☐ 不通过　说明：按钮可点但点了没反应（见下方说明）                                                                                                         |
 
 > **这一项无法用自动化测试覆盖，也是撤销最大的单点风险。** 撤销的过期校验是逐字节比对
-> `块 DOM 的 outerHTML` 与记录里的 afterHTML（`src/persist.ts`）。只要内核、思源或任何一次后续渲染
-> 把这段 HTML 规范化了一点点（属性顺序、大小写、空格、实体写法），每一条记录都会被判成过期而静默丢弃：
-> 按钮仍然是可点的，点下去什么也不发生。
-> 因此本项必须实测；若失败，请连同「重载前后块 DOM 的 outerHTML 差异」一起记录，那才是要改的地方。
+> `块 DOM 的 outerHTML` 与记录里的 afterHTML（`src/persist.ts` 的 `resolveUndoTargets`）。只要内核、
+> 思源或任何一次后续渲染把这段 HTML 规范化了一点点（属性顺序、大小写、空格、实体写法），
+> 每一条记录都会被判成过期并**静默丢弃**：栈顶被弹出、文档不变、面板也不重画，
+> 于是按钮仍然是可点的，点下去什么也不发生。
+> 因此本项必须实测；若不通过，请连同「重渲染前后块 DOM 的 outerHTML 差异」一起记录，那才是要改的地方。
 >
-> 注意：撤销栈只活在**当前这次面板会话**里。重新加载文档 / 重开面板之后栈是空的，
-> 此时「撤销」按钮应当是**禁用**状态 —— 若它可点，说明栈没被清掉，属于缺陷。
-> 要在重载之后仍能撤销，就在重载后**重新**做一次装饰，再立刻点「撤销」，两者之间不要编辑该块。
+> **本项刻意不刷新文档**：撤销栈只活在当前这次面板会话里 —— `src/index.ts` 在面板关闭时就 `clearChanges()`，
+> 而刷新页面会连 JS 上下文一起销毁，栈必然是空的，那种情形下「撤销」应当是**禁用**状态，
+> 测不出上面说的风险（本项之前写成「重载之后再撤销」，按字面执行必然失败：预期结果永远不成立）。
+> 顺带确认：若重载文档或重开面板之后「撤销」仍可点，说明栈没被清掉，属于缺陷。
 
 ## 14. 撤销：改动之后又编辑过该块
 
@@ -237,24 +239,24 @@
 
 ## 结果汇总
 
-| 序号 | 验证项                               | 结论 | 备注 |
-| ---- | ------------------------------------ | ---- | ---- |
-| 1    | 浮动工具栏出现图标                   |      |      |
-| 2    | 应用下划线与上划线（含默认状态断言） |      |      |
-| 3    | `.sy` 里 `style` 原样落盘            |      |      |
-| 4    | 刷新与重开文档                       |      |      |
-| 5    | 两个方向异配置                       |      |      |
-| 6    | 跨区域应用                           |      |      |
-| 7    | 文档历史可回滚                       |      |      |
-| 8    | 同步到另一设备                       |      |      |
-| 9    | 导出降级                             |      |      |
-| 10   | 发布服务页面                         |      |      |
-| 11   | 只读模式                             |      |      |
-| 12   | 移动端面板布局与触控                 |      |      |
-| 13   | 撤销：落盘并重载文档之后（桌面端）   |      |      |
-| 14   | 撤销：改动之后又编辑过该块           |      |      |
-| 15   | 子范围内改动不影响同一块里的其他装饰 |      |      |
-| 16   | 面板与浮动工具栏的遮挡               |      |      |
+| 序号 | 验证项                                         | 结论 | 备注 |
+| ---- | ---------------------------------------------- | ---- | ---- |
+| 1    | 浮动工具栏出现图标                             |      |      |
+| 2    | 应用下划线与上划线（含默认状态断言）           |      |      |
+| 3    | `.sy` 里 `style` 原样落盘                      |      |      |
+| 4    | 刷新与重开文档                                 |      |      |
+| 5    | 两个方向异配置                                 |      |      |
+| 6    | 跨区域应用                                     |      |      |
+| 7    | 文档历史可回滚                                 |      |      |
+| 8    | 同步到另一设备                                 |      |      |
+| 9    | 导出降级                                       |      |      |
+| 10   | 发布服务页面                                   |      |      |
+| 11   | 只读模式                                       |      |      |
+| 12   | 移动端面板布局与触控                           |      |      |
+| 13   | 撤销：内核重渲染规范化了块 HTML 之后（不刷新） |      |      |
+| 14   | 撤销：改动之后又编辑过该块                     |      |      |
+| 15   | 子范围内改动不影响同一块里的其他装饰           |      |      |
+| 16   | 面板与浮动工具栏的遮挡                         |      |      |
 
 ## 遗留问题
 
@@ -268,23 +270,23 @@ The tables above are the authoritative ones; this section is the same list in En
 [English README](../README.md) audience has a path to it. Record results in the Chinese tables above
 (or copy the rows into your own report) — the item numbers match one-to-one.
 
-| #  | Check                                                              | Expected                                                                                                                                                                    |
-| -- | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1  | Icon appears in the floating toolbar                               | The **Underline Enhancement** icon shows up, with the same tooltip                                                                                                          |
-| 2  | Apply underline and overline                                       | The underline switch starts **on** and the overline switch starts **off**; the overline rows are disabled while it is off; both lines render with their own style and color |
-| 3  | `style` lands verbatim in the `.sy` file (key evidence)            | The block's `content` keeps all three `text-decoration-*` declarations byte-for-byte; no `text-decoration-color` when following the text color                              |
-| 4  | Reload and reopen the document                                     | Decoration survives; reopening the panel restores the last configuration                                                                                                    |
-| 5  | Two directions with different styles                               | Each line keeps its own style and color; repeated edits leave no residue                                                                                                    |
-| 6  | Apply across regions                                               | Each editable region is wrapped on its own, no duplicated or empty blocks, every block saved separately                                                                     |
-| 7  | Document history can roll back                                     | Document history removes the decoration and leaves the rest of the text alone                                                                                               |
-| 8  | Sync to another device                                             | Decoration survives                                                                                                                                                         |
-| 9  | Export degradation (real instance required)                        | Markdown / HTML / PDF collapse the underline to `<u>`; overline, style and color are lost — SiYuan's behaviour                                                              |
-| 10 | Published page (real instance required)                            | Decoration renders; the toolbar icon is absent because the plugin skips read-only and publish mode                                                                          |
-| 11 | Read-only mode (real instance required)                            | Decoration renders and no toolbar icon appears                                                                                                                              |
-| 12 | Mobile panel layout and touch                                      | Panel stays inside the viewport and scrolls if needed; touch targets are at least 32px; switches toggle                                                                     |
-| 13 | Undo after the save flushed and the document re-rendered (desktop) | Undo removes the decoration. Byte-exact staleness checking cannot be covered by automated tests                                                                             |
-| 14 | Undo after editing the same block again                            | The stale entry is skipped; the newly typed text is never overwritten                                                                                                       |
-| 15 | Sub-range edit in a block that has decoration elsewhere            | Only the selected range is restyled or cleared; the other decoration is preserved byte-for-byte                                                                             |
-| 16 | Panel is not occluded by the floating toolbar                      | Every control, including **Clear decoration** and **Undo**, stays visible and clickable                                                                                     |
+| #  | Check                                                                       | Expected                                                                                                                                                                    |
+| -- | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1  | Icon appears in the floating toolbar                                        | The **Underline Enhancement** icon shows up, with the same tooltip                                                                                                          |
+| 2  | Apply underline and overline                                                | The underline switch starts **on** and the overline switch starts **off**; the overline rows are disabled while it is off; both lines render with their own style and color |
+| 3  | `style` lands verbatim in the `.sy` file (key evidence)                     | The block's `content` keeps all three `text-decoration-*` declarations byte-for-byte; no `text-decoration-color` when following the text color                              |
+| 4  | Reload and reopen the document                                              | Decoration survives; reopening the panel restores the last configuration                                                                                                    |
+| 5  | Two directions with different styles                                        | Each line keeps its own style and color; repeated edits leave no residue                                                                                                    |
+| 6  | Apply across regions                                                        | Each editable region is wrapped on its own, no duplicated or empty blocks, every block saved separately                                                                     |
+| 7  | Document history can roll back                                              | Document history removes the decoration and leaves the rest of the text alone                                                                                               |
+| 8  | Sync to another device                                                      | Decoration survives                                                                                                                                                         |
+| 9  | Export degradation (real instance required)                                 | Markdown / HTML / PDF collapse the underline to `<u>`; overline, style and color are lost — SiYuan's behaviour                                                              |
+| 10 | Published page (real instance required)                                     | Decoration renders; the toolbar icon is absent because the plugin skips read-only and publish mode                                                                          |
+| 11 | Read-only mode (real instance required)                                     | Decoration renders and no toolbar icon appears                                                                                                                              |
+| 12 | Mobile panel layout and touch                                               | Panel stays inside the viewport and scrolls if needed; touch targets are at least 32px; switches toggle                                                                     |
+| 13 | Undo after the kernel re-rendered and normalised the block HTML (no reload) | Undo removes the decoration. Byte-exact staleness checking cannot be covered by automated tests                                                                             |
+| 14 | Undo after editing the same block again                                     | The stale entry is skipped; the newly typed text is never overwritten                                                                                                       |
+| 15 | Sub-range edit in a block that has decoration elsewhere                     | Only the selected range is restyled or cleared; the other decoration is preserved byte-for-byte                                                                             |
+| 16 | Panel is not occluded by the floating toolbar                               | Every control, including **Clear decoration** and **Undo**, stays visible and clickable                                                                                     |
 
 Items 3, 9, 10, 11, 13 and 16 cannot be confirmed statically — they need this instance.
