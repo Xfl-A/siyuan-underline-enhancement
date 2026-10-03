@@ -34,7 +34,6 @@ module.exports = (env, argv) => {
             new CopyPlugin({
                 patterns: [
                     ...packageImagePatterns,
-                    // README 与 boot-appearances 由后续任务补齐，缺失时不阻塞构建。
                     {from: "README*.md", to: "./dist/", noErrorOnMissing: true},
                     {from: "plugin.json", to: "./dist/"},
                     {from: "boot-appearances/", to: "./dist/boot-appearances/", noErrorOnMissing: true},

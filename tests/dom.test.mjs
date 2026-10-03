@@ -5,7 +5,15 @@ import {toHost} from "./helpers/loadModule.mjs";
 
 const fixture = createFixture();
 const {document, window, module, mount, select, selectWithin, textNodesOf, decorationsIn, offsetIn} = fixture;
-const {collectEditableGroups, stripDecorationIn, applySpansIn, captureOffsets, restoreOffsets, getEventName} = module;
+const {
+    collectEditableGroups,
+    stripDecorationIn,
+    applySpansIn,
+    captureOffsets,
+    restoreOffsets,
+    reclaimEditableElement,
+    getEventName,
+} = module;
 
 // 偏移三元组在 vm realm 里造出来，投影成纯数据后搬回宿主 realm 再断言，避免跨 realm 的原型差异
 const offsetsOf = (groups) => toHost(groups.map((group) => [group.start, group.end]));
@@ -281,6 +289,158 @@ test("collectEditableGroups ignores a selection collapsed to a caret", () => {
     const cleanup = mount(editor('<p data-type="text" data-node-id="p1">abc</p>'));
     const paragraph = document.querySelector("p");
     assert.deepEqual(offsetsOf(collectEditableGroups(selectWithin(paragraph, 1, 1))), []);
+    cleanup();
+});
+
+// ---------------------------------------------------------------- 带子列表的列表项
+
+// 思源的列表项同时是自己的一块、又能带子列表，两种身份叠在同一个 <li> 上。
+// 这个夹具是「本项文字包在 <p> 里」的写法：文字因此落在比列表项更内层、且不含子列表的那一层上。
+// 另一种写法（本项文字直接作为 <li> 的子节点）之下没有更内层的区域，仍按纯容器跳过；
+// 真实思源用哪种写法只能上实例看，见 docs/manual-verification.md 第 6 项。
+const nestedListWithOwnParagraph = editor(
+    `<ul class="b3-list">
+        <li data-type="listItem" class="b3-list-item" data-node-id="A">
+            <p data-type="text" class="b3-list-item__text">own text</p><ul class="b3-list"><li data-type="listItem" class="b3-list-item" data-node-id="B">child text</li></ul>
+        </li>
+    </ul>`,
+);
+
+test("collectEditableGroups keeps a list item's own text editable when it holds a nested sub-list", () => {
+    const cleanup = mount(nestedListWithOwnParagraph);
+    const item = document.querySelector('[data-node-id="A"]');
+    const own = item.querySelector("p");
+    const range = selectWithin(own, 4, 8);
+    assert.equal(range.toString(), "text");
+
+    const groups = collectEditableGroups(range);
+
+    assert.equal(groups.length, 1, "带子列表的列表项，它自己的文字不能因为块内还有子块就被整块跳过");
+    assert.equal(groups[0].editableElement, own, "可编辑区域是承载本项文字的那一层，不是整个列表项");
+    // 块仍是这个列表项本身：落盘按块元素取 HTML 与块 id
+    assert.equal(groups[0].blockElement, item);
+    assert.deepEqual(offsetsOf(groups), [[4, 8]]);
+    assert.equal(own.textContent.slice(groups[0].start, groups[0].end), "text");
+    cleanup();
+});
+
+test("collectEditableGroups does not split a list item's own text along its inline elements", () => {
+    const cleanup = mount(editor(
+        '<ul class="b3-list"><li data-type="listItem" data-node-id="A"><p>own <strong>bold</strong> tail</p><ul class="b3-list"><li data-type="listItem" data-node-id="B">child</li></ul></li></ul>',
+    ));
+    const own = document.querySelector('[data-node-id="A"] > p');
+
+    const groups = collectEditableGroups(selectWithin(own, 0, 13));
+
+    // 区域边界必须落在块级上：按行内标记切区域的话，同一段文字会变成两个区域，偏移各按各的算
+    assert.equal(groups.length, 1, "行内元素不构成区域边界");
+    assert.equal(groups[0].editableElement, own);
+    assert.deepEqual(offsetsOf(groups), [[0, 13]]);
+    assert.equal(own.textContent.slice(groups[0].start, groups[0].end), "own bold tail");
+    cleanup();
+});
+
+test("collectEditableGroups splits a selection across a parent list item and its child item into two groups", () => {
+    const cleanup = mount(nestedListWithOwnParagraph);
+    const item = document.querySelector('[data-node-id="A"]');
+    const own = item.querySelector("p");
+    const child = document.querySelector('[data-node-id="B"]');
+
+    const groups = collectEditableGroups(select(own, 4, child, 5));
+
+    // 静默只应用一半是最难察觉的失败形态：父项与子项必须各自成为一个区域
+    assert.equal(groups.length, 2, "跨父项与子项的选区必须分成两组，不能静默跳过其中一边");
+    assert.deepEqual(toHost(groups.map((group) => group.editableElement.tagName)), ["P", "LI"]);
+    assert.deepEqual(offsetsOf(groups), [[4, 8], [0, 5]]);
+    assert.deepEqual(
+        toHost(groups.map((group) => group.blockElement.getAttribute("data-node-id"))),
+        ["A", "B"],
+        "两个区域各自记自己的块，保存时才不会把两个块并成一次",
+    );
+
+    for (const group of groups) {
+        applySpansIn(group.editableElement, group.start, group.end, [underlineSpec()]);
+    }
+
+    assert.deepEqual(
+        decorationsIn(document.body),
+        [
+            {marker: "u", style: UNDERLINE_CSS, text: "text"},
+            {marker: "u", style: UNDERLINE_CSS, text: "child"},
+        ],
+        "父项自己的文字与子项的文字都要被装饰",
+    );
+    assert.deepEqual(decorationsIn(own), [{marker: "u", style: UNDERLINE_CSS, text: "text"}]);
+    assert.deepEqual(decorationsIn(child), [{marker: "u", style: UNDERLINE_CSS, text: "child"}]);
+    cleanup();
+});
+
+test("applySpansIn decorates a list item's own text and leaves the nested sub-list alone", () => {
+    const cleanup = mount(nestedListWithOwnParagraph);
+    const item = document.querySelector('[data-node-id="A"]');
+    const own = item.querySelector("p");
+    const child = document.querySelector('[data-node-id="B"]');
+    const before = item.textContent;
+
+    for (const group of collectEditableGroups(selectWithin(own, 0, 8))) {
+        applySpansIn(group.editableElement, group.start, group.end, [underlineSpec()]);
+    }
+
+    // data-sue 必须落在这个列表项之内、承载本项文字的那一层里
+    assert.deepEqual(decorationsIn(own), [{marker: "u", style: UNDERLINE_CSS, text: "own text"}]);
+    assert.ok(item.contains(own.querySelector("[data-sue]")), "装饰要写在文档里的这个列表项内部");
+    // 子列表不在选区里：既不能被包裹，也不能被剥掉既有装饰
+    assert.deepEqual(decorationsIn(child), [], "子列表里的内容不属于本次选区");
+    assert.deepEqual(blockTagsInDecorations(item), [], "span 里不能出现块级元素");
+    assert.deepEqual(blockIDsInDecorations(item), [], "块被搬进 span 会复制出重号的 data-node-id");
+    assert.deepEqual(blockIDsIn(document.body), ["A", "B"], "块 id 必须仍然唯一");
+    assert.equal(item.textContent, before, "一个字符都不能动");
+    cleanup();
+});
+
+test("collectEditableGroups still contributes nothing from a block that only wraps other blocks", () => {
+    // 纯容器块：它的直接文本只有子块之间的空白，包住毫无意义
+    const cleanup = mount(editor(
+        `<div data-type="NodeBlockQuote" data-node-id="A">
+            <div data-type="blocks" data-node-id="B"><p data-type="text" data-node-id="C">first</p></div>
+            <div data-type="blocks" data-node-id="D"><p data-type="text" data-node-id="E">second</p></div>
+        </div>`,
+    ));
+    const wrapper = document.querySelector('[data-node-id="A"]');
+    // 两个子块之间那段空白文本节点
+    const between = wrapper.childNodes[2];
+    assert.equal(between.nodeType, 3, "夹具必须真的在两个子块之间留了空白文本节点");
+    assert.ok(between.data.trim() === "", `夹具里的空白文本节点不应含可见文字：${between.data}`);
+
+    assert.deepEqual(
+        offsetsOf(collectEditableGroups(select(between, 0, between, between.data.length))),
+        [],
+        "纯容器块自身不产生任何分组",
+    );
+
+    // 同一块里落在子块上的文字照旧按子块分组：容器块被跳过不等于整块的内容不可编辑
+    const first = document.querySelector('[data-node-id="C"]');
+    const second = document.querySelector('[data-node-id="E"]');
+    const groups = collectEditableGroups(select(first, 0, second, 6));
+    assert.equal(groups.length, 2);
+    assert.deepEqual(
+        toHost(groups.map((group) => group.editableElement.getAttribute("data-node-id"))),
+        ["C", "E"],
+    );
+    cleanup();
+});
+
+test("collectEditableGroups resolves a single nested block to that block instead of the wrapper", () => {
+    const cleanup = mount(
+        editor('<div data-type="blocks" data-node-id="A"><div data-type="text" data-node-id="B">text</div></div>'),
+    );
+    const inner = document.querySelector('[data-node-id="B"]');
+
+    const groups = collectEditableGroups(selectWithin(inner, 0, 4));
+
+    assert.equal(groups.length, 1);
+    assert.equal(groups[0].editableElement, inner, "文字全在子块里时，区域就是那个子块");
+    assert.equal(groups[0].blockElement, inner);
     cleanup();
 });
 
@@ -579,6 +739,41 @@ test("applySpansIn does nothing for an empty or inverted offset range", () => {
     applySpansIn(blank, 0, 5, [underlineSpec()]);
     assert.deepEqual(decorationsIn(blank), [], "块里没有文本节点时不该凭空造出 span");
     assert.equal(text.textContent, "abc");
+    cleanup();
+});
+
+// ---------------------------------------------------------------- reclaimEditableElement
+
+test("reclaimEditableElement finds the same inner area again after the block HTML was swapped", () => {
+    const cleanup = mount(nestedListWithOwnParagraph);
+    const item = document.querySelector('[data-node-id="A"]');
+    const own = item.querySelector("p");
+    const before = item.outerHTML;
+    const groups = collectEditableGroups(selectWithin(own, 0, 8));
+    applySpansIn(groups[0].editableElement, groups[0].start, groups[0].end, [underlineSpec()]);
+
+    // 模拟 persist.undoLastChange：整块 HTML 换回去，块连同子树一起被换掉
+    item.outerHTML = before;
+    const reclaimed = reclaimEditableElement(groups[0].editableElement, document.querySelector('[data-node-id="A"]'));
+
+    assert.equal(reclaimed.tagName, "P", "认领到的仍是承载本项文字的那一层，而不是整个列表项");
+    assert.ok(reclaimed.isConnected);
+    assert.ok(
+        !reclaimed.contains(document.querySelector('[data-node-id="B"]')),
+        "认领到的区域不能把子列表圈进来",
+    );
+
+    // 认领之后再改一次设置：装饰照旧落在本项文字上，子列表里的装饰也不该被顺手剥掉
+    const child = document.querySelector('[data-node-id="B"]');
+    applySpansIn(child, 0, 10, [underlineSpec(DOTTED_CSS)]);
+    applySpansIn(reclaimed, 0, 8, [underlineSpec(DOTTED_CSS)]);
+
+    assert.deepEqual(decorationsIn(reclaimed), [{marker: "u", style: DOTTED_CSS, text: "own text"}]);
+    assert.deepEqual(
+        decorationsIn(child),
+        [{marker: "u", style: DOTTED_CSS, text: "child text"}],
+        "拿整个列表项当区域的话，剥旧装饰会把子列表里的装饰一起剥掉",
+    );
     cleanup();
 });
 

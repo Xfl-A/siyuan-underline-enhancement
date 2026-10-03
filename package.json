@@ -12,7 +12,7 @@
     "build": "webpack --config webpack.config.js --mode production"
   },
   "keywords": [],
-  "author": "your-name",
+  "author": "Xfl-A",
   "license": "MIT",
   "engines": {
     "node": ">=24.0.0"

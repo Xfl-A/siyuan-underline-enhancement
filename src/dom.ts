@@ -52,8 +52,18 @@ const PHRASING_TAGS = new Set((
  */
 const TITLE_SELECTOR = ":scope > .callout-info > .callout-title, :scope > .fn__flex-item > .fn__flex-item__label";
 
-/** 块内若还有别的可编辑区域（子块或兄弟标题区），这个块就只是个容器，不是可编辑区域 */
+/** 块内若还有别的可编辑区域（子块或兄弟标题区），这个块多半只是个容器；容器块另有下文那条收紧规则 */
 const NESTED_REGION_SELECTOR = `${BLOCK_SELECTOR}, ${TITLE_SELECTOR}`;
+
+/**
+ * 「这一层内部有没有别处可编辑的东西」，不锚在块上。
+ *
+ * 收紧区域问的是内部有没有嵌套区域，与候选处在块的哪一层无关，因此不能用上面那条锚在块上的
+ * TITLE_SELECTOR：从标签页项（.fn__flex-item）内部去看，`:scope > .fn__flex-item > ...` 匹配不上，
+ * 于是标签与标签之间的空白会被误判成可包裹的区域，凭空造出一个只含空白的区域。
+ * 宁可多拒一点。这里的两个类名必须与 TITLE_SELECTOR 保持一致，改一处要改两处。
+ */
+const NESTED_REGION_INSIDE_SELECTOR = `${BLOCK_SELECTOR}, .callout-title, .fn__flex-item__label`;
 
 /**
  * 不可编辑区域：这些区域内的文本不参与分组。
@@ -98,7 +108,36 @@ const isNonEditable = (node: Node): boolean => {
 };
 
 /**
- * 判定文本节点所属的可编辑区域，优先级：表格单元格 → 标题区 → 所属块。
+ * 块内更紧的可编辑区域：从文本所在元素往上、到块为止，第一层「块级且内部没有别的可编辑区域」的祖先。
+ *
+ * 为什么需要它：容器块的判定只看「块里有没有子块」，而列表项把这两种身份叠在同一个元素上 ——
+ * 它自己是一块（文字要能装饰、也要能落盘），又能带子列表。此时整块当区域会把子列表一起圈进来，
+ * 整块跳过又会让本项自己的文字静默不生效。真正承载这段文字的那一层（列表项里的段落）才是区域：
+ * 它内部没有别的可编辑区域，包裹与剥 span 都碰不到子列表。
+ *
+ * 行内元素一律跳过：区域边界必须是块级。否则同一段文字会随行内标记被切成几个区域
+ * （「纯文字 + <strong> + 纯文字」变成两个区域），偏移与包裹范围也就跟着碎了。
+ *
+ * 找不到就返回 null：文字是块自己的直接子节点（块间空白、或纯容器块）时，本块之下确实没有区域。
+ */
+const ownRegionBelow = (element: Element, block: Element): HTMLElement => {
+    for (
+        let candidate = element;
+        candidate !== null && candidate !== block.parentElement;
+        candidate = candidate.parentElement
+    ) {
+        if (PHRASING_TAGS.has(candidate.tagName)) {
+            continue;
+        }
+        if (candidate.querySelector(NESTED_REGION_INSIDE_SELECTOR) === null) {
+            return candidate as HTMLElement;
+        }
+    }
+    return null;
+};
+
+/**
+ * 判定文本节点所属的可编辑区域，优先级：表格单元格 → 标题区 → 所属块 → 块内更紧的一层。
  * 判定不出区域（编辑器容器这类结构节点）时返回 null，该文本不参与装饰。
  */
 const resolveEditableElement = (node: Node): HTMLElement => {
@@ -122,9 +161,10 @@ const resolveEditableElement = (node: Node): HTMLElement => {
             return title as HTMLElement;
         }
     }
-    // 块与块之间的空白文本节点会落到容器上，包住它们毫无意义
+    // 块内还有别的可编辑区域：要么这块是纯容器（它的文字全在子块里，或是子块之间的空白，包住毫无意义），
+    // 要么像带子列表的列表项那样自带文字 —— 后者改用块内更紧的那一层，当成纯容器跳过就等于静默漏装饰
     if (block.querySelector(NESTED_REGION_SELECTOR) !== null) {
-        return null;
+        return ownRegionBelow(element, block);
     }
     return block as HTMLElement;
 };
@@ -432,8 +472,9 @@ export const readDecorationStylesIn = (
  * 块 HTML 被整体换过之后，在新块里按同样的位置找回可编辑区域。
  *
  * 换掉的只是本插件写下的装饰 span（撤销的前后两版 HTML 就差这些 span），块的结构没有变，
- * 因此「同一个单元格 / 同一个标题区」可以按位置精确对上，而不是靠猜或者干脆退回块自身：
- * 退回块自身在表格里是危险的，偏移是相对单元格算的，套到整张表上会裹出一段跨单元格的装饰。
+ * 因此「同一个单元格 / 同一个标题区 / 同一个块内层级」都可以按位置精确对上，而不是靠猜或者干脆退回块自身：
+ * 退回块自身在表格里是危险的，偏移是相对单元格算的，套到整张表上会裹出一段跨单元格的装饰；
+ * 块内还有子列表时同样危险，剥旧装饰会把子列表里的装饰一起剥掉。
  *
  * 区域还连着文档时原样返回；新块里找不到对应位置时也退回块自身，
  * 那意味着区域内没有更细的层级，块自身就是可编辑区域（普通段落即是）。
@@ -466,6 +507,28 @@ export const reclaimEditableElement = (editableElement: HTMLElement, blockElemen
     if (titleIndex !== -1) {
         const titles = Array.from(blockElement.querySelectorAll(TITLE_SELECTOR));
         return (titles[titleIndex] as HTMLElement) ?? blockElement;
+    }
+    // 块内更紧的一层（列表项里承载本项文字的那个段落）：按同一条「元素序号」路径在新块里找回同一层。
+    // 不能退回块自身：这种块里还有子列表，拿块当区域的话，下一次改动会在剥旧装饰时把子列表里的装饰一并剥掉。
+    if (editableElement !== oldBlock) {
+        const path: number[] = [];
+        let current: Element = editableElement;
+        while (current !== oldBlock) {
+            const parent = current.parentElement;
+            if (parent === null) {
+                return blockElement;
+            }
+            path.unshift(Array.from(parent.children).indexOf(current));
+            current = parent;
+        }
+        let found: Element | null = blockElement;
+        for (const index of path) {
+            found = found === null ? null : found.children[index] ?? null;
+        }
+        // 结构对不上（例如思源期间重排过块）就宁可退回块自身，也不把装饰裹到别处去
+        if (found !== null && found !== blockElement && found.querySelector(NESTED_REGION_INSIDE_SELECTOR) === null) {
+            return found as HTMLElement;
+        }
     }
     return blockElement;
 };
