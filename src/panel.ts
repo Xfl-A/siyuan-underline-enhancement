@@ -40,6 +40,13 @@ export interface IPanelOptions {
 export interface IPanelController {
     /** 当前配置的一份快照；改动返回值不会影响面板自身状态 */
     getPair: () => IDecorationPair;
+    /**
+     * 用外部读回的配置覆盖面板状态并重画控件。
+     *
+     * 清除装饰与撤销都由调用方直接改文档，面板自己看不到结果，得靠这里把选中态刷回来；
+     * 这不是用户操作，因此不触发 onChange。
+     */
+    setPair: (pair: IDecorationPair) => void;
     /** 移除面板并摘掉所有监听；可重复调用 */
     destroy: () => void;
 }
@@ -65,6 +72,8 @@ const SWITCH_ATTRIBUTE = "data-sue-switch";
 const STYLE_ATTRIBUTE = "data-sue-style";
 /** 颜色色块上记录的颜色值（已过白名单） */
 const COLOR_ATTRIBUTE = "data-sue-color";
+/** 当前自定义色的临时色块标记；带它的色块不算预设 */
+const CUSTOM_SWATCH_ATTRIBUTE = "data-sue-custom-swatch";
 /** 跟随文字色色块标记 */
 const FOLLOW_ATTRIBUTE = "data-sue-follow-color";
 /** 自定义取色器标记 */
@@ -133,8 +142,11 @@ const DEFAULT_COLOR_VALUE = "#000000";
  */
 const HEX_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
 /**
- * 线型色块里的示例文本。两个 EN SPACE（U+2002）不参与空白折叠，
- * 于是按钮里总有一段可供装饰线绘制的文本，而面板里看不到多余字形。
+ * 线型色块里的示例文本：两个 EN SPACE（U+2002），合计约 1em。
+ *
+ * EN SPACE 属于 Unicode Zs，而 CSS Text Level 3 把 Zs/Zl/Zp 的码位定义为「可折叠空白」，
+ * 因此色块上必须配 white-space: pre：默认的 normal 会把两个折成一个 0.5em，
+ * 画出来的线只剩七八个像素宽，dotted 缩成一个点、dashed 缩成一截，五个线型就分不出来了。
  */
 const SAMPLE_TEXT = "\u2002\u2002";
 
@@ -146,6 +158,8 @@ interface ISectionWidgets {
     followSwatch: HTMLButtonElement;
     colorSwatches: HTMLButtonElement[];
     customInput: HTMLInputElement;
+    /** 当前自定义色的临时色块；不是预设色，随时可能被撤掉 */
+    customSwatch: HTMLButtonElement | null;
 }
 
 /** 复制一组配置，避免调用方改到面板内部的状态 */
@@ -164,17 +178,19 @@ const createElement = <T extends HTMLElement>(doc: Document, tagName: string, cl
 
 /**
  * 线型色块：靠元素自身的 text-decoration 画出真实的线，不画图标字符也不用图片。
+ *
+ * `direction` 决定线画在文字的上方还是下方：上划线区块画上划线，
+ * 两个区块的预览才不会长得一模一样，用户也才看得出这一行管的是哪一侧。
  * 三个属性都必须写全：只写 text-decoration-style 时线型仍取自默认的 solid。
  */
-const createStyleSwatch = (doc: Document, style: TLineStyle): HTMLButtonElement => {
+const createStyleSwatch = (doc: Document, style: TLineStyle, direction: TDirection): HTMLButtonElement => {
     const swatch = createElement<HTMLButtonElement>(doc, "button", `${BUTTON_CLASS} ${SWATCH_CLASS}`);
     swatch.type = "button";
     swatch.setAttribute(STYLE_ATTRIBUTE, style);
     swatch.setAttribute("aria-pressed", "false");
     swatch.textContent = SAMPLE_TEXT;
-    // 线型关键词是 CSS 关键字，两种语言通用，因此直接当提示文案用
-    swatch.title = style;
-    swatch.style.textDecorationLine = "underline";
+    swatch.style.whiteSpace = "pre";
+    swatch.style.textDecorationLine = direction;
     swatch.style.textDecorationStyle = style;
     swatch.style.textDecorationColor = "currentColor";
     return swatch;
@@ -260,7 +276,7 @@ const buildSection = (
     section.appendChild(toggleRow.row);
 
     const styleRow = createRow(doc, "style", translate("lineStyle"), "", SWATCHES_CLASS);
-    const styleSwatches = LINE_STYLES.map((style) => createStyleSwatch(doc, style));
+    const styleSwatches = LINE_STYLES.map((style) => createStyleSwatch(doc, style, direction));
     for (const swatch of styleSwatches) {
         styleRow.control.appendChild(swatch);
     }
@@ -282,7 +298,34 @@ const buildSection = (
     colorRow.control.appendChild(customInput);
     section.appendChild(colorRow.row);
 
-    return {section, toggle, styleSwatches, followSwatch, colorSwatches, customInput};
+    return {section, toggle, styleSwatches, followSwatch, colorSwatches, customInput, customSwatch: null};
+};
+
+/**
+ * 补上或撤掉当前自定义色的临时色块。
+ *
+ * 规格 §3.3 要求「自定义色值加入预设」。既不在预设里、也不跟随文字色的颜色若没有自己的色块，
+ * 整行 11 个色块就一个都没选中，用户看不出当前用的是哪个颜色。
+ * 这块色块是临时的：换成预设色或跟随文字色时立刻撤掉，因此色板始终是 10 个预设。
+ */
+const syncCustomSwatch = (doc: Document, widgets: ISectionWidgets, color: string): void => {
+    const current = widgets.customSwatch;
+    // 已经挂着当前这一块就别动：切换开关之类的操作也会走到 render，来回重建只会白白换掉 DOM 节点
+    if (current !== null && current.getAttribute(COLOR_ATTRIBUTE) === color) {
+        return;
+    }
+    if (current !== null) {
+        current.remove();
+        widgets.customSwatch = null;
+    }
+    if (color === "" || PRESET_COLORS.indexOf(color) !== -1) {
+        return;
+    }
+    const swatch = createColorSwatch(doc, color);
+    swatch.setAttribute(CUSTOM_SWATCH_ATTRIBUTE, "");
+    markSelected(swatch, true);
+    widgets.customInput.parentNode.insertBefore(swatch, widgets.customInput);
+    widgets.customSwatch = swatch;
 };
 
 /** 视口尺寸；documentElement 的 clientWidth 在部分环境为 0，退回 window.innerWidth */
@@ -309,7 +352,11 @@ const placePanel = (panel: HTMLElement, anchor: HTMLElement): void => {
     const doc = panel.ownerDocument;
     const view = doc.defaultView;
     const panelRect = panel.getBoundingClientRect();
-    const anchorRect = typeof anchor?.getBoundingClientRect === "function" ? anchor.getBoundingClientRect() : null;
+    // 锚点必须还在文档里：浮动工具栏被思源重渲染后，旧节点会脱离文档，
+    // 而脱离文档的元素照样能量出矩形（全零），拿它算居中会把面板钉到视口左上角
+    const anchorRect = anchor?.isConnected === true && typeof anchor.getBoundingClientRect === "function" ?
+        anchor.getBoundingClientRect() :
+        null;
     const viewport = viewportSize(doc);
     panel.style.position = "absolute";
     if (anchorRect === null) {
@@ -403,7 +450,8 @@ export const createPanel = (options: IPanelOptions): IPanelController => {
             for (const swatch of widgets.colorSwatches) {
                 markSelected(swatch, swatch.getAttribute(COLOR_ATTRIBUTE) === color);
             }
-            // 块上已有的自定义色既不在预设里、也不跟随文字色，只有取色器能显示它；
+            syncCustomSwatch(ownerDocument, widgets, color);
+            // 块上已有的自定义色既不在预设里、也不跟随文字色，取色器要跟着显示它；
             // 颜色不是 #rrggbb 时不动控件，免得把用户刚挑的颜色抹成黑色
             if (HEX_COLOR_PATTERN.test(color)) {
                 widgets.customInput.value = color;
@@ -477,6 +525,14 @@ export const createPanel = (options: IPanelOptions): IPanelController => {
 
     return {
         getPair: () => clonePair(pair),
+        setPair: (next: IDecorationPair) => {
+            if (destroyed) {
+                return;
+            }
+            // 与构造时同一条防线：外部读回的值一律先过白名单，面板内部只持有干净数据
+            pair = sanitizePair(next);
+            render();
+        },
         destroy: () => {
             if (destroyed) {
                 return;

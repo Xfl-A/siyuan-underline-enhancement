@@ -44,13 +44,14 @@
   gap: 4px;
 }
 
-/* 色块只定尺寸与排列，边框、背景与悬浮态沿用 b3-button */
+// 色块只定尺寸与排列，边框、背景与悬浮态沿用 b3-button。
+// 宽度要放得下那段约 1em 的示例文本（外加控件自身的内边距），预览线才画得满色块
 [data-sue-panel] .sue-swatch {
-  width: 26px;
+  width: 32px;
 }
 
 [data-sue-panel] .sue-color-input {
-  width: 28px;
+  width: 34px;
 }
 
 /* 选中态：向外扩一圈，不盖住色块自身的颜色 */
@@ -68,11 +69,11 @@
 }
 
 [data-sue-panel][data-sue-mobile] .sue-swatch {
-  width: 32px;
+  width: 36px;
 }
 
 [data-sue-panel][data-sue-mobile] .sue-color-input {
-  width: 32px;
+  width: 36px;
 }
 
 /* 窄屏兜底：不依赖 JS 的标记，纯宽度断点也生效 */
@@ -82,6 +83,6 @@
   }
 
   [data-sue-panel] .sue-swatch {
-    width: 32px;
+    width: 36px;
   }
 }

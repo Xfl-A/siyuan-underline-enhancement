@@ -12,7 +12,8 @@ import {
 } from "./helpers/loadModule.mjs";
 
 // 面板文案应当逐字来自 i18n 文件；直接读真实文件，键名对不上会立刻暴露
-const i18n = JSON.parse(readFileSync(new URL("../src/i18n/zh-CN.json", import.meta.url), "utf8"));
+const readLocale = (locale) => JSON.parse(readFileSync(new URL(`../src/i18n/${locale}.json`, import.meta.url), "utf8"));
+const i18n = readLocale("zh-CN");
 
 // 颜色白名单在测试侧独立写一遍：复用被测代码的同一份正则，断言就成了自证。
 const WHITELIST = "(#[0-9a-fA-F]{3,4}|#[0-9a-fA-F]{6}|#[0-9a-fA-F]{8}|var\\(--b3-[A-Za-z0-9_-]+\\))";
@@ -60,6 +61,17 @@ const stubRects = (window, anchorRect, panelRect) => {
     };
 };
 
+/** 一组色块里被选中的那些；querySelectorAll 给的是 NodeList，先摊成数组 */
+const selectedSwatches = (swatches) =>
+    Array.from(swatches).filter((swatch) => swatch.getAttribute("aria-pressed") === "true");
+
+/**
+ * 整个色块行里被选中的数量：预设、跟随文字色与临时色块合起来算。
+ * 「整行只允许一个选中项」是用户能直接看懂的约束，就拿它当断言。
+ */
+const selectedCountIn = (section) =>
+    selectedSwatches(section.querySelectorAll("[data-sue-color], [data-sue-follow-color]")).length;
+
 const createFixture = (options = {}) => {
     const frontend = options.frontend ?? "desktop";
     const initialPair = options.initialPair ?? SOLID_PAIR;
@@ -70,6 +82,10 @@ const createFixture = (options = {}) => {
     const {window} = dom;
     const {document} = window;
     const anchor = document.getElementById("anchor");
+    // 思源重渲染浮动工具栏后，旧节点会脱离文档；面板必须不再拿它定位
+    if (options.detachAnchor === true) {
+        anchor.remove();
+    }
     if (options.rects !== undefined) {
         stubRects(window, options.rects.anchor, options.rects.panel);
     }
@@ -101,7 +117,11 @@ const createFixture = (options = {}) => {
     const section = (direction) => panel.querySelector(`[data-sue-section="${direction}"]`);
     const switchOf = (direction) => section(direction).querySelector("[data-sue-switch]");
     const styleSwatchesOf = (direction) => Array.from(section(direction).querySelectorAll("[data-sue-style]"));
-    const colorSwatchesOf = (direction) => Array.from(section(direction).querySelectorAll("[data-sue-color]"));
+    // 预设色块：自定义色的临时色块另带标记，不算预设，因此预设恒为 10 块
+    const colorSwatchesOf = (direction) =>
+        Array.from(section(direction).querySelectorAll("[data-sue-color]:not([data-sue-custom-swatch])"));
+    const customSwatchesOf = (direction) => Array.from(section(direction).querySelectorAll("[data-sue-custom-swatch]"));
+    const customSwatchOf = (direction) => section(direction).querySelector("[data-sue-custom-swatch]");
     const followSwatchOf = (direction) => section(direction).querySelector("[data-sue-follow-color]");
     const customInputOf = (direction) => section(direction).querySelector("[data-sue-custom-color]");
     const labelOf = (direction, row) => section(direction).querySelector(`[data-sue-row="${row}"] [data-sue-label]`);
@@ -133,6 +153,8 @@ const createFixture = (options = {}) => {
         switchOf,
         styleSwatchesOf,
         colorSwatchesOf,
+        customSwatchesOf,
+        customSwatchOf,
         followSwatchOf,
         customInputOf,
         labelOf,
@@ -191,13 +213,31 @@ test("面板含两个方向区块，各带开关、5 个线型色块、跟随文
 
 test("线型色块靠元素自身的 text-decoration 画出真实的线", () => {
     const {styleSwatchesOf, close} = createFixture();
-    for (const swatch of styleSwatchesOf("underline")) {
-        assert.equal(swatch.style.textDecorationLine, "underline");
-        assert.equal(swatch.style.textDecorationStyle, swatch.getAttribute("data-sue-style"));
-        assert.equal(swatch.style.textDecorationColor, "currentColor");
-        assert.notEqual(swatch.textContent, "", "色块里必须有可供装饰线绘制的文本");
-        assert.equal(swatch.children.length, 0, "预览不靠子元素画，也不放图标字符");
-        assert.equal(swatch.getElementsByTagName("img").length, 0, "预览不用图片");
+    // 每个区块画自己的方向：上划线区块画上划线，否则那一行看起来只是上面那行的复制品
+    for (const [direction, line] of [["underline", "underline"], ["overline", "overline"]]) {
+        for (const swatch of styleSwatchesOf(direction)) {
+            assert.equal(swatch.style.textDecorationLine, line, `${direction} 区块的线型色块`);
+            assert.equal(swatch.style.textDecorationStyle, swatch.getAttribute("data-sue-style"));
+            assert.equal(swatch.style.textDecorationColor, "currentColor");
+            assert.notEqual(swatch.textContent, "", "色块里必须有可供装饰线绘制的文本");
+            assert.equal(swatch.children.length, 0, "预览不靠子元素画，也不放图标字符");
+            assert.equal(swatch.getElementsByTagName("img").length, 0, "预览不用图片");
+            assert.equal(swatch.title, "", "CSS 关键词当提示文案在中文界面里读不懂，预览本身就是提示");
+        }
+    }
+    close();
+});
+
+test("线型色块禁止空白折叠，预览线才画得满色块", () => {
+    const {styleSwatchesOf, close} = createFixture();
+    for (const direction of ["underline", "overline"]) {
+        for (const swatch of styleSwatchesOf(direction)) {
+            // 示例文本用的是 EN SPACE（U+2002，Unicode Zs），属于 CSS 定义的「可折叠空白」；
+            // white-space 保持 normal 的话两个会被折成一个 0.5em，线只剩七八个像素宽，
+            // dotted 变成一个点、dashed 变成一截，五个线型就分不出来了
+            assert.equal(swatch.style.whiteSpace, "pre", `${direction} 区块的线型色块必须禁止折叠`);
+            assert.ok(swatch.textContent.length >= 2, "示例文本要够长，线才有可辨认的长度");
+        }
     }
     close();
 });
@@ -301,28 +341,79 @@ test("点击跟随文字色色块与自定义取色器都会更新该方向的�
     close();
 });
 
-test("块上已有的自定义色回填到取色器，非 #rrggbb 的颜色不写进去", () => {
-    const {customInputOf, colorSwatchesOf, close} = createFixture({
+test("块上已有的自定义色既回填取色器、也补一块临时色块，非 #rrggbb 的不写进取色器", () => {
+    const {section, customInputOf, colorSwatchesOf, customSwatchOf, customSwatchesOf, close} = createFixture({
         initialPair: {
             underline: {enabled: true, style: "solid", color: "#123456"},
             overline: {enabled: true, style: "solid", color: "var(--b3-font-color8)"},
         },
     });
-    assert.equal(customInputOf("underline").value, "#123456", "自定义色既不在预设里，只能靠取色器显示");
+    assert.equal(customInputOf("underline").value, "#123456", "自定义色不在预设里，取色器要显示它");
     assert.equal(customInputOf("overline").value, "#000000", "主题变量不是取色器能接受的形状，不写进去");
-    assert.ok(
-        !colorSwatchesOf("underline").some((swatch) => swatch.getAttribute("aria-pressed") === "true"),
-        "不属于预设的颜色不该被认成某个预设色块",
-    );
+
+    const custom = customSwatchOf("underline");
+    assert.ok(custom, "自定义色要补一块临时色块，否则整行没有任何选中项");
+    assert.equal(custom.getAttribute("data-sue-color"), "#123456");
+    assert.equal(customSwatchesOf("underline").length, 1, "临时色块最多一块");
+    assert.equal(custom.getAttribute("aria-pressed"), "true", "选中项就是这块临时色块");
+    assert.equal(selectedCountIn(section("underline")), 1, "整行只允许一个选中项");
+    assert.equal(selectedSwatches(colorSwatchesOf("underline")).length, 0, "不能顺带选中某个预设");
+    assert.equal(customSwatchOf("overline"), null, "主题变量正好是预设色，不需要临时色块");
+    assert.equal(colorSwatchesOf("overline")[9].getAttribute("aria-pressed"), "true");
+    close();
+});
+
+test("挑了自定义色之后整行只有一个色块被选中，换回预设色或跟随文字色后临时色块撤掉", () => {
+    const {
+        section,
+        customInputOf,
+        followSwatchOf,
+        colorSwatchesOf,
+        customSwatchOf,
+        customSwatchesOf,
+        window,
+        lastChange,
+        close,
+    } = createFixture();
+    const pick = (value) => {
+        const input = customInputOf("underline");
+        input.value = value;
+        input.dispatchEvent(new window.Event("change", {bubbles: true}));
+    };
+
+    pick("#123456");
+    assert.equal(lastChange().underline.color, "#123456");
+    assert.equal(customSwatchesOf("underline").length, 1, "自定义色补一块临时色块");
+    assert.equal(customSwatchOf("underline").getAttribute("aria-pressed"), "true");
+    assert.equal(selectedCountIn(section("underline")), 1, "整行只允许一个选中项");
+    assert.equal(colorSwatchesOf("underline").length, 10, "预设色板仍是 10 块，临时色块不算预设");
+
+    colorSwatchesOf("underline")[5].click();
+    assert.equal(lastChange().underline.color, "#0090ff");
+    assert.equal(customSwatchesOf("underline").length, 0, "换回预设色就撤掉临时色块");
+    assert.equal(colorSwatchesOf("underline")[5].getAttribute("aria-pressed"), "true");
+    assert.equal(selectedCountIn(section("underline")), 1);
+
+    pick("#654321");
+    assert.equal(customSwatchesOf("underline").length, 1, "再挑自定义色要重新补上");
+    followSwatchOf("underline").click();
+    assert.equal(lastChange().underline.color, "");
+    assert.equal(customSwatchesOf("underline").length, 0, "跟随文字色也要撤掉临时色块");
+    assert.equal(followSwatchOf("underline").getAttribute("aria-pressed"), "true");
+    assert.equal(selectedCountIn(section("underline")), 1);
     close();
 });
 
 test("重复点击当前已选中的色块不触发 onChange", () => {
-    const {styleSwatchesOf, colorSwatchesOf, followSwatchOf, changes, close} = createFixture();
+    const {styleSwatchesOf, colorSwatchesOf, followSwatchOf, customInputOf, window, changes, close} = createFixture();
     // 初始 pair 的下划线已经是 solid + #e5484d，上划线已经跟随文字色
     styleSwatchesOf("underline")[0].click();
     colorSwatchesOf("underline")[0].click();
     followSwatchOf("overline").click();
+    // 取色器重新挑出同一个颜色同理：四类控件都要挡住「无变化的提交」
+    const input = customInputOf("underline");
+    input.value = "#e5484d";
+    input.dispatchEvent(new window.Event("change", {bubbles: true}));
     assert.equal(changes().length, 0, "点已选中的项没有任何新意图，不该多一次保存");
 
     styleSwatchesOf("underline")[1].click();
@@ -366,6 +457,41 @@ test("getPair 返回快照，改动它不会污染面板内部状态", () => {
     close();
 });
 
+test("setPair 用外部读回的配置刷新控件，且不触发 onChange", () => {
+    const {controller, switchOf, styleSwatchesOf, followSwatchOf, colorSwatchesOf, changes, close} = createFixture();
+    // 清除装饰 / 撤销之后由调用方把真实状态读回来回填：这不是用户操作，不该回调 onChange
+    const cleared = {
+        underline: {enabled: false, style: "dashed", color: ""},
+        overline: {enabled: false, style: "dotted", color: "var(--b3-font-color8)"},
+    };
+    controller.setPair(cleared);
+    assert.equal(changes().length, 0, "外部回填不是用户意图，不能回调 onChange");
+    assert.equal(switchOf("underline").checked, false, "开关要跟着灭掉");
+    assert.equal(switchOf("overline").checked, false);
+    assert.equal(styleSwatchesOf("underline")[1].getAttribute("aria-pressed"), "true", "线型选中态也要刷新");
+    assert.equal(styleSwatchesOf("overline")[2].getAttribute("aria-pressed"), "true");
+    assert.ok(followSwatchOf("underline").classList.contains("sue-swatch--selected"));
+    assert.equal(colorSwatchesOf("overline")[9].getAttribute("aria-pressed"), "true");
+    assert.equal(styleSwatchesOf("underline")[0].getAttribute("aria-pressed"), "false", "旧选中态要清掉");
+    assert.deepEqual(toHost(controller.getPair()), cleared);
+    close();
+});
+
+test("setPair 与构造一样先过白名单", () => {
+    const {controller, close} = createFixture();
+    controller.setPair({
+        underline: {enabled: true, style: "zigzag", color: "red;position:fixed"},
+        overline: {enabled: "yes", style: "wavy", color: "#ABC"},
+    });
+    const pair = toHost(controller.getPair());
+    assert.equal(pair.underline.color, "", "脏颜色退回跟随文字色");
+    assert.equal(pair.underline.style, "solid", "非法线型退回 solid");
+    assert.equal(pair.underline.enabled, true, "布尔以外的 enabled 退回默认值");
+    assert.equal(pair.overline.style, "wavy");
+    assert.equal(pair.overline.color, "#ABC");
+    close();
+});
+
 // ------------------------------------------------------------------ 销毁与定位
 
 test("面板内的点击不关闭，面板外的点击与 Esc 才关闭", () => {
@@ -398,6 +524,20 @@ test("destroy 移除面板元素、摘掉挂在 document 上的监听并让面�
     assert.equal(changes().length, 0, "已脱离文档的面板控件也不该再回调");
     controller.destroy();
     controller.destroy();
+    close();
+});
+
+test("锚点脱离文档时不参与定位，面板退回视口边距", () => {
+    // 这里给脱离文档的锚点也桩一个有意义的矩形，是刻意与真实浏览器作对：
+    // 真浏览器里脱离文档的元素量到的是全零，会被视口夹取顺手救回边距，看不出走的是哪条路径。
+    // 桩上去之后，只有 isConnected 这道闸门能把「拿失效锚点定位」这件事挡下来。
+    const {anchor, panel, close} = createFixture({
+        rects: {anchor: rect(300, 120, 200, 40), panel: rect(0, 0, 300, 400)},
+        detachAnchor: true,
+    });
+    assert.equal(anchor.isConnected, false);
+    assert.equal(panel.style.left, "12px", "失效锚点的坐标不能拿来算居中位置");
+    assert.equal(panel.style.top, "12px");
     close();
 });
 
@@ -490,6 +630,42 @@ test("面板文案全部取自 options.i18n，没有硬编码字面量", () => {
         "saveFailed 属于 Task 6 的错误路径，面板不该用它",
     );
     assert.equal(section("underline").getAttribute("data-sue-section"), "underline");
+    close();
+});
+
+test("面板实际用到的每个 i18n 键在两种语言的真实文件里都存在", () => {
+    // 键清单从面板自己问出来的：i18n 换成记录用的 Proxy，面板取哪个键就被记下哪个。
+    // 这样漏用、多用或写错一个键都会被抓到，而不是只核对一份手抄的清单。
+    const requested = [];
+    const recording = new Proxy({}, {
+        get: (target, key) => {
+            requested.push(key);
+            return `⟦${String(key)}⟧`;
+        },
+    });
+    const {close} = createFixture({i18n: recording});
+    assert.deepEqual(
+        [...new Set(requested)].sort(),
+        [
+            "clearDecoration",
+            "color",
+            "customColor",
+            "followTextColor",
+            "lineStyle",
+            "overline",
+            "underline",
+            "underlineEnhancement",
+            "undo",
+        ],
+        "面板用到的键集合变了：新增或漏用都要同步核对",
+    );
+    for (const locale of ["zh-CN", "en"]) {
+        const table = readLocale(locale);
+        for (const key of new Set(requested)) {
+            assert.equal(typeof table[key], "string", `${locale}.json 缺少面板用到的键 ${key}`);
+            assert.notEqual(table[key].trim(), "", `${locale}.json 的 ${key} 是空串，界面上会显示空白`);
+        }
+    }
     close();
 });
 

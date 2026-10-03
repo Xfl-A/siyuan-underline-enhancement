@@ -402,6 +402,10 @@ export const restoreOffsets = (captured: Array<[HTMLElement, number, number]>): 
  * 返回当前前端应使用的事件名：移动端用 touchend，其余用 click。
  *
  * 思源内部的 getEventName 没有导出到 petal 的公开类型，不能从 "siyuan" 包 import，
- * 只能在这里按 getFrontend() 自己实现；面板与编辑器的所有事件绑定都得走这个函数。
+ * 只能在这里按 getFrontend() 自己实现；凡是「点一下就响应」的控件绑定都要走这个函数。
+ *
+ * 例外是表单控件自身的 change / input：它们两端行为一致，而且**不能**改成 touchend ——
+ * 移动端承载复选框勾选的是 touchend 之后浏览器补发的那个 click，
+ * 在 touchend 里读 input.checked 读到的还是切换前的值；input[type=color] 在移动端更是压根不产生 click。
  */
 export const getEventName = (): string => (getFrontend() === "mobile" ? "touchend" : "click");
