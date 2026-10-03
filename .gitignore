@@ -1,0 +1,15 @@
+.idea
+node_modules
+.DS_Store
+.eslintcache
+.dprint
+dist
+package.zip
+index.css
+index.js
+kernel.js
+/i18n
+
+# 仅为开发期参考拉取的上游仓库，不属于本插件
+/_siyuan
+/_template
