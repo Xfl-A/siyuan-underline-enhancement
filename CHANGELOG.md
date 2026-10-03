@@ -17,10 +17,17 @@ First release.
   `text-decoration-style` instead of icon characters.
 * Color choice per direction: follow the text color, 10 preset colors, and a custom color input. A custom value
   gets its own swatch so the color in use stays visible.
-* **Clear decoration** to remove both directions, and **Undo** to step back one change.
+* **Clear decoration** to remove both directions from the selection, and **Undo** to step back one change —
+  all blocks that change touched are reverted by a single press.
 * Live preview on the selection with a 300 ms debounced save. The last configuration used is remembered and
   becomes the panel's starting point next time.
 * Selection ranges spanning paragraphs, list items and table cells; every affected block is saved on its own.
+  A _tight_ list whose item text is a direct child of the `<li>` is the exception: it has no editable region
+  of its own, so that text cannot be decorated.
+* A direction's style and colour rows are disabled while its switch is off, so the first click on a colour
+  cannot apply a line the user never asked for. The underline switch starts on, the overline switch off.
+* When the regions of one selection do not all carry the same decoration, the panel says so before the user
+  clicks: one change applies that configuration to the whole selection.
 * Decorations are persisted as inline styles through `/api/block/updateBlock` with `dataType: "dom"`, so they
   keep rendering in read-only mode, on published pages and wherever the plugin is not loaded.
 * English and Chinese UI strings (`i18n/en.json`, `i18n/zh-CN.json`).
@@ -33,5 +40,10 @@ First release.
 * SiYuan's Ctrl+Z undo stack does not cover this plugin's operations. Use the panel's **Undo** button or
   SiYuan's document history.
 * Code blocks are not supported, matching SiYuan's own floating toolbar.
+* Applying, restyling and **Clear decoration** are scoped to the selected range: decoration elsewhere in the
+  same block is preserved, and has to be selected to be changed or cleared.
+* Undo covers one recorded change within the current panel session. It is skipped when any of its blocks no
+  longer matches what that change left behind (because it has been edited since), and the stack is emptied
+  when the panel closes.
 
 [0.1.0]: https://github.com/Xfl-A/siyuan-underline-enhancement/releases/tag/v0.1.0

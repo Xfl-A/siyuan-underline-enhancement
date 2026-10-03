@@ -294,6 +294,7 @@ const createFixture = (options = {}) => {
     const colorSwatchOf = (direction, color) => sectionOf(direction).querySelector(`[data-sue-color="${color}"]`);
     const followSwatchOf = (direction) => sectionOf(direction).querySelector("[data-sue-follow-color]");
     const actionButton = (action) => panelElement().querySelector(`[data-sue-action="${action}"]`);
+    const mixedHint = () => panelElement().querySelector("[data-sue-mixed]");
     const pressed = (element) => element.getAttribute("aria-pressed") === "true";
 
     const click = (element) => element.dispatchEvent(new window.MouseEvent("click", {bubbles: true}));
@@ -325,6 +326,7 @@ const createFixture = (options = {}) => {
         colorSwatchOf,
         followSwatchOf,
         actionButton,
+        mixedHint,
         pressed,
         click,
         toggle,
@@ -388,6 +390,79 @@ test("点击工具栏项创建带 data-sue-panel 的面板，并接管浮动工�
     assert.equal(f.panelElement(), null);
     // 收摊之后把思源原来的回调还回去，别把插件的回调留在它的对象上
     assert.equal(protyle.toolbar.subElementCloseCB, originalCloseCB);
+});
+
+test("跨两段应用后按一次撤销就把两段一起退回", async () => {
+    const f = createFixture({blocks: TWO_BLOCKS_HTML});
+    f.plugin.onload();
+    f.clickToolbarItem(f.protyleOf(f.crossRange()));
+    f.click(f.styleSwatchOf("underline", "wavy"));
+    await settle();
+    assert.match(f.blockHTML(BLOCK_A), DECORATED_UNDERLINE);
+    assert.match(f.blockHTML(BLOCK_B), DECORATED_UNDERLINE);
+
+    f.click(f.actionButton("undo"));
+    await tick();
+
+    // 用户做的是一次操作，撤销也必须是一次：只退回后一段的话，
+    // 面板还显示着「下划线开启 / 波浪线」，实际却有一半选区没有装饰
+    assert.equal(f.blockHTML(BLOCK_A).includes("data-sue"), false, "第一段也要一起退回");
+    assert.equal(f.blockHTML(BLOCK_B).includes("data-sue"), false, "第二段要退回");
+    assert.equal(f.blockHTML(BLOCK_A), SINGLE_BLOCK_HTML);
+    assert.equal(f.blockHTML(BLOCK_B), `<p data-type="text" data-node-id="${BLOCK_B}">world</p>`);
+    // 一次操作只记一条记录，撤完栈就该空了
+    assert.equal(f.actionButton("undo").disabled, true, "一次操作不能占多条记录，否则撤一次撤不干净");
+    // 文档回到没有任何装饰的状态，面板也随之
+    assert.equal(f.switchOf("underline").checked, true, "没有装饰时回填的是默认值");
+    assert.equal(f.pressed(f.styleSwatchOf("underline", "solid")), true);
+});
+
+test("选区内的装饰不一致时面板先给出混合提示，点一下才统一", async () => {
+    // 只有第二块被装饰过，第一块是干净的：只读第一块的话，
+    // 面板会拿默认值开场，用户随手一点就把第二块的装饰改掉了，且事先没有任何提示
+    const html = `<p data-type="text" data-node-id="${BLOCK_A}">hello</p>` +
+        `<p data-type="text" data-node-id="${BLOCK_B}"><span data-sue="u" style="${NESTED_CSS.underline}">world</span></p>`;
+    const f = createFixture({blocks: html});
+    f.plugin.onload();
+    f.clickToolbarItem(f.protyleOf(f.crossRange()));
+
+    const hint = f.mixedHint();
+    assert.ok(hint, "混合选区必须显式告知用户");
+    assert.equal(hint.hidden, false);
+    // 面板展示的是第一个有装饰的分组的配置
+    assert.equal(f.pressed(f.styleSwatchOf("underline", "wavy")), true);
+    assert.equal(f.colorSwatchOf("underline", "#e5484d") !== null, true);
+
+    f.click(f.styleSwatchOf("underline", "dotted"));
+    assert.equal(f.mixedHint().hidden, true, "统一之后提示撤掉");
+    assert.match(f.blockHTML(BLOCK_A), DECORATED_UNDERLINE_DOTTED, "第一段按面板当前这份配置铺开");
+    assert.match(f.blockHTML(BLOCK_B), DECORATED_UNDERLINE_DOTTED, "第二段被统一，而不是保持原样");
+});
+
+test("选区内的装饰一致时不显示混合提示", () => {
+    const html = `<p data-type="text" data-node-id="${BLOCK_A}">` +
+        `<span data-sue="u" style="${NESTED_CSS.underline}">hello</span></p>` +
+        `<p data-type="text" data-node-id="${BLOCK_B}">` +
+        `<span data-sue="u" style="${NESTED_CSS.underline}">world</span></p>`;
+    const f = createFixture({blocks: html});
+    f.plugin.onload();
+    f.clickToolbarItem(f.protyleOf(f.crossRange()));
+
+    assert.equal(f.mixedHint().hidden, true);
+    assert.equal(f.pressed(f.styleSwatchOf("underline", "wavy")), true);
+});
+
+test("选区里没有装饰时按清除装饰不发请求", async () => {
+    const f = createFixture();
+    f.plugin.onload();
+    f.clickToolbarItem();
+
+    f.click(f.actionButton("clear"));
+    await settle();
+
+    // 文档本来就没有装饰，这次「清除」什么都没改：发一个逐字节相同的块只是白写一次
+    assert.deepEqual(f.posts, [], "没有实际改动时不该有 updateBlock");
+    assert.deepEqual(f.calls.messages, []);
 });
 
 test("面板里的改动落到选区上，跨块时每个块各发一次 updateBlock", async () => {

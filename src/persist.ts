@@ -9,11 +9,21 @@
  */
 import {fetchSyncPost} from "siyuan";
 
-/** 一条撤销记录：把 beforeHTML 写回去就等于回到这次改动之前 */
-export interface IChangeEntry {
+/** 一次改动里的一个块：把 beforeHTML 写回去就等于把这个块退回到这次改动之前 */
+export interface IBlockChange {
     blockId: string;
     beforeHTML: string;
     afterHTML: string;
+}
+
+/**
+ * 一条撤销记录 = 用户的一次操作。
+ *
+ * 一次操作可能同时改动多个块（跨段落、跨单元格），因此记录里带的是一组块而不是单个块：
+ * 按块各记一条的话，跨块那一次按一次撤销只会退回最后一个块，退一半比不退更难察觉。
+ */
+export interface IChangeEntry {
+    blocks: IBlockChange[];
 }
 
 /** 防抖保存器的接口，由 createDebouncedSaver 返回 */
@@ -90,9 +100,17 @@ export const saveBlockDOM = async (blockElement: HTMLElement): Promise<boolean> 
     return postBlockDOM(blockId, blockElement.outerHTML);
 };
 
-/** 记下一次改动；超过栈深上限时挤掉最老的一条 */
-export const recordChange = (blockId: string, beforeHTML: string, afterHTML: string): void => {
-    changeStack.push({blockId, beforeHTML, afterHTML});
+/**
+ * 记下一次用户操作涉及的全部块；超过栈深上限时挤掉最老的一条。
+ *
+ * 一次调用 = 栈里的一条记录，这是「按一次撤销退回到用户做的那一步」的粒度。
+ * 空数组不记：没有块被改动的操作不该在栈里留下一条永远撤不动的记录。
+ */
+export const recordChange = (blocks: IBlockChange[]): void => {
+    if (blocks.length === 0) {
+        return;
+    }
+    changeStack.push({blocks: blocks.slice()});
     if (changeStack.length > MAX_STACK_DEPTH) {
         changeStack.splice(0, changeStack.length - MAX_STACK_DEPTH);
     }
@@ -106,27 +124,57 @@ export const clearChanges = (): void => {
     changeStack.length = 0;
 };
 
+/** 撤销时要处理的块：块 id 与当前文档里对应的块元素 */
+interface IUndoTarget extends IBlockChange {
+    blockElement: HTMLElement;
+}
+
 /**
- * 撤销最近一次仍然有效的改动：把 beforeHTML 写回内核，再把块 DOM 替换回去。
+ * 校验一条记录里的每个块，任一个对不上就整条作废（返回 null）。
  *
- * 过期校验必须在写回之前完成：用户在装饰之后又编辑过该块时，记录里的 afterHTML 已经对不上当前 DOM，
- * 此时回滚会连同用户的后续编辑一起抹掉，因此丢弃该条并继续向前找。块已不在文档里（被删除、
- * 或用户已切走文档）同样无从校验与写回，一并丢弃。丢弃是必要的：留着过期记录，撤销会一直卡在它上面。
+ * 元素要在写回之前全部取好：换块 HTML 会让元素脱管，边校验边换会让后面的块拿到旧引用。
+ */
+const resolveUndoTargets = (entry: IChangeEntry): IUndoTarget[] | null => {
+    const targets: IUndoTarget[] = [];
+    for (const block of entry.blocks) {
+        const blockElement = findBlockElement(block.blockId);
+        if (blockElement === null || blockElement.outerHTML !== block.afterHTML) {
+            return null;
+        }
+        targets.push({...block, blockElement});
+    }
+    return targets;
+};
+
+/**
+ * 撤销最近一次仍然有效的操作：把每个块的 beforeHTML 写回内核，再把块 DOM 替换回去。
  *
- * 先落盘再改界面：写回失败时文档与界面都保持原样，记录也留着，用户还能重试。
+ * 过期校验必须在写回之前完成，而且是逐块做的：用户在装饰之后又编辑过其中任何一个块时，
+ * 记录里的 afterHTML 就已经对不上当前 DOM，此时回滚会连同用户的后续编辑一起抹掉，因此整条丢弃并
+ * 继续向前找。只要有一个块过期或已不在文档里（被删除、或用户已切走文档），这条记录就作废；
+ * 留着过期记录，撤销会一直卡在它上面。
  *
- * @returns 是否真的回滚了一条；栈空或剩余记录全部过期时为 false
+ * 先落盘再改界面：写回失败时界面保持原样，记录也留着，用户还能重试。写回中途失败时先落盘的那几个块
+ * 已经在磁盘上退回，但记录仍然有效（块 DOM 未动，过后校验依旧通过），重试会把这批写回原样再发一次，
+ * 因此重试不会把界面带偏。
+ *
+ * @returns 是否真的回滚了一条操作；栈空或剩余记录全部过期时为 false
  */
 export const undoLastChange = async (): Promise<boolean> => {
     while (changeStack.length > 0) {
         const entry = changeStack[changeStack.length - 1];
-        const blockElement = findBlockElement(entry.blockId);
-        if (blockElement !== null && blockElement.outerHTML === entry.afterHTML) {
-            if (!await postBlockDOM(entry.blockId, entry.beforeHTML)) {
-                return false;
+        const targets = resolveUndoTargets(entry);
+        if (targets !== null) {
+            for (const target of targets) {
+                if (!await postBlockDOM(target.blockId, target.beforeHTML)) {
+                    return false;
+                }
             }
             changeStack.pop();
-            blockElement.outerHTML = entry.beforeHTML;
+            // 块 DOM 要在所有写回成功之后再换：换掉一个块会让拿在手里的引用脱管
+            for (const target of targets) {
+                target.blockElement.outerHTML = target.beforeHTML;
+            }
             return true;
         }
         changeStack.pop();

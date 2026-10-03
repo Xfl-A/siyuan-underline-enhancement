@@ -31,6 +31,12 @@ export interface IPanelOptions {
     i18n: Record<string, string>;
     /** 撤销按钮是否可用；撤销栈本身只有 src/index.ts 知道 */
     undoEnabled: boolean;
+    /**
+     * 选区里的各区域装饰并不一致，initialPair 只是其中一份。
+     * 面板据此先说明再让用户点：一次改动会把整个选区统一成面板当前这一份配置，
+     * 不说清楚的话，第一下点击就会静默改写用户没打算动的那些区域。
+     */
+    mixed?: boolean;
     onChange: (pair: IDecorationPair) => void;
     onClear: () => void;
     onUndo: () => void;
@@ -44,9 +50,9 @@ export interface IPanelController {
      * 用外部读回的配置覆盖面板状态并重画控件。
      *
      * 清除装饰与撤销都由调用方直接改文档，面板自己看不到结果，得靠这里把选中态刷回来；
-     * 这不是用户操作，因此不触发 onChange。
+     * 这不是用户操作，因此不触发 onChange。第二个实参重报选区是否仍不一致（撤销之后要重新判一次）。
      */
-    setPair: (pair: IDecorationPair) => void;
+    setPair: (pair: IDecorationPair, mixed?: boolean) => void;
     /** 移除面板并摘掉所有监听；可重复调用 */
     destroy: () => void;
 }
@@ -82,6 +88,8 @@ const CUSTOM_COLOR_ATTRIBUTE = "data-sue-custom-color";
 const ACTION_ATTRIBUTE = "data-sue-action";
 /** 标题标记 */
 const TITLE_ATTRIBUTE = "data-sue-title";
+/** 「选区装饰不一致」提示标记 */
+const MIXED_ATTRIBUTE = "data-sue-mixed";
 /** 动作行标记 */
 const ACTIONS_ATTRIBUTE = "data-sue-actions";
 /** 移动端标记；面板据此放大触控目标并加滚动兜底 */
@@ -115,6 +123,8 @@ const COLOR_INPUT_CLASS = "b3-text-field sue-color-input";
 const ACTIONS_CLASS = "fn__flex fn__flex-justify sue-actions";
 /** 标题类 */
 const TITLE_CLASS = "sue-title";
+/** 混合提示类；排版用弱化的一行说明文字，不做成输入框 */
+const MIXED_CLASS = "sue-mixed";
 
 // ---------------------------------------------------------------- 定位与常量
 
@@ -122,6 +132,11 @@ const TITLE_CLASS = "sue-title";
 const ANCHOR_GAP = 8;
 /** 面板与视口边缘的最小间距（px） */
 const VIEWPORT_MARGIN = 12;
+/**
+ * 面板的最大高度。桌面端也要有：定位只夹两个轴，窗口矮过面板时没有它就直接把底部裁掉，
+ * 而裁掉的部分正是「清除装饰 / 撤销」两个动作按钮。给出上限之后改为纵向滚动，哪一端都能到达。
+ */
+const MAX_HEIGHT = "80vh";
 /** 移动端兜底的最大高度：窄屏上内容超出时改为纵向滚动 */
 const MOBILE_MAX_HEIGHT = "60vh";
 /** 移动端标记的属性值 */
@@ -182,11 +197,21 @@ const createElement = <T extends HTMLElement>(doc: Document, tagName: string, cl
  * `direction` 决定线画在文字的上方还是下方：上划线区块画上划线，
  * 两个区块的预览才不会长得一模一样，用户也才看得出这一行管的是哪一侧。
  * 三个属性都必须写全：只写 text-decoration-style 时线型仍取自默认的 solid。
+ *
+ * 按钮里唯一的可见内容是示例文本（两个 EN SPACE），对读屏软件来说没有名字，因此
+ * aria-label 必须给。刻意不用 CSS 关键词当名字：中文界面里 "wavy" 对用户没有意义，
+ * 名字取自 i18n（线型中文名 + 方向）。
  */
-const createStyleSwatch = (doc: Document, style: TLineStyle, direction: TDirection): HTMLButtonElement => {
+const createStyleSwatch = (
+    doc: Document,
+    style: TLineStyle,
+    direction: TDirection,
+    ariaLabel: string,
+): HTMLButtonElement => {
     const swatch = createElement<HTMLButtonElement>(doc, "button", `${BUTTON_CLASS} ${SWATCH_CLASS}`);
     swatch.type = "button";
     swatch.setAttribute(STYLE_ATTRIBUTE, style);
+    swatch.setAttribute("aria-label", ariaLabel);
     swatch.setAttribute("aria-pressed", "false");
     swatch.textContent = SAMPLE_TEXT;
     swatch.style.whiteSpace = "pre";
@@ -258,6 +283,18 @@ const createRow = (
     return {row: rowElement, control};
 };
 
+/**
+ * 线型色块的无障碍名：线型中文名 + 方向。
+ *
+ * i18n 键按 `style` + 首字母大写的线型拼出（styleSolid / styleWavy …），
+ * 因此新增线型只要在两个语言文件里各加一条，面板这边不用改。
+ * 带上方向是因为两个区块各有一排长得一模一样的线型色块，只有名字能把它们区分开。
+ */
+const lineStyleName = (translate: (key: string) => string, style: TLineStyle, direction: TDirection): string => {
+    const name = translate(`style${style[0].toUpperCase()}${style.slice(1)}`);
+    return `${name} · ${translate(direction)}`;
+};
+
 const buildSection = (
     doc: Document,
     direction: TDirection,
@@ -276,7 +313,9 @@ const buildSection = (
     section.appendChild(toggleRow.row);
 
     const styleRow = createRow(doc, "style", translate("lineStyle"), "", SWATCHES_CLASS);
-    const styleSwatches = LINE_STYLES.map((style) => createStyleSwatch(doc, style, direction));
+    const styleSwatches = LINE_STYLES.map((style) =>
+        createStyleSwatch(doc, style, direction, lineStyleName(translate, style, direction))
+    );
     for (const swatch of styleSwatches) {
         styleRow.control.appendChild(swatch);
     }
@@ -298,8 +337,26 @@ const buildSection = (
     colorRow.control.appendChild(customInput);
     section.appendChild(colorRow.row);
 
-    return {section, toggle, styleSwatches, followSwatch, colorSwatches, customInput, customSwatch: null};
+    return {
+        section,
+        toggle,
+        styleSwatches,
+        followSwatch,
+        colorSwatches,
+        customInput,
+        customSwatch: null,
+    };
 };
+
+/** syncCustomSwatch 的附加参数 */
+interface ICustomSwatchContext {
+    /** 当前方向是否启用；关闭时临时色块同样不可点 */
+    enabled: boolean;
+    /** 与面板其余控件一致的事件名 */
+    eventName: string;
+    /** 选中该颜色的回调 */
+    bind: (color: string) => void;
+}
 
 /**
  * 补上或撤掉当前自定义色的临时色块。
@@ -307,11 +364,21 @@ const buildSection = (
  * 规格 §3.3 要求「自定义色值加入预设」。既不在预设里、也不跟随文字色的颜色若没有自己的色块，
  * 整行 11 个色块就一个都没选中，用户看不出当前用的是哪个颜色。
  * 这块色块是临时的：换成预设色或跟随文字色时立刻撤掉，因此色板始终是 10 个预设。
+ *
+ * 事件在它被造出来的那一刻就绑，而不是只绑构造期的那一批色块：只绑预设色块的话，
+ * 这块长得和按钮一模一样、焦点也拿得到，点了却毫无反应。
+ * enabled 决定它此刻是否可用，与同行的预设色块保持一致。
  */
-const syncCustomSwatch = (doc: Document, widgets: ISectionWidgets, color: string): void => {
+const syncCustomSwatch = (
+    doc: Document,
+    widgets: ISectionWidgets,
+    color: string,
+    context: ICustomSwatchContext,
+): void => {
     const current = widgets.customSwatch;
     // 已经挂着当前这一块就别动：切换开关之类的操作也会走到 render，来回重建只会白白换掉 DOM 节点
     if (current !== null && current.getAttribute(COLOR_ATTRIBUTE) === color) {
+        current.disabled = !context.enabled;
         return;
     }
     if (current !== null) {
@@ -323,6 +390,8 @@ const syncCustomSwatch = (doc: Document, widgets: ISectionWidgets, color: string
     }
     const swatch = createColorSwatch(doc, color);
     swatch.setAttribute(CUSTOM_SWATCH_ATTRIBUTE, "");
+    swatch.disabled = !context.enabled;
+    swatch.addEventListener(context.eventName, () => context.bind(swatch.getAttribute(COLOR_ATTRIBUTE)));
     markSelected(swatch, true);
     widgets.customInput.parentNode.insertBefore(swatch, widgets.customInput);
     widgets.customSwatch = swatch;
@@ -402,21 +471,29 @@ export const createPanel = (options: IPanelOptions): IPanelController => {
 
     // 外部传入的配置先过一遍白名单，面板内部只持有干净数据
     let pair = sanitizePair(options.initialPair);
+    // 选区里的装饰不一致时先挂提示；用户改一次之后整个选区就被统一了，提示随之撤掉
+    let mixed = options.mixed === true;
     let destroyed = false;
 
     const panel = createElement<HTMLDivElement>(ownerDocument, "div", PANEL_CLASS);
     panel.setAttribute(PANEL_ATTRIBUTE, "");
+    // 两端都要限高：定位只夹坐标轴，窗口比面板还矮时没有这条就把底部（含两个动作按钮）裁掉
+    panel.style.maxHeight = mobile ? MOBILE_MAX_HEIGHT : MAX_HEIGHT;
+    panel.style.overflowY = "auto";
     if (mobile) {
         panel.setAttribute(MOBILE_ATTRIBUTE, MOBILE_VALUE);
-        // 窄屏兜底：面板不参与思源布局，超出视口时改为纵向滚动，而不是被裁掉
-        panel.style.maxHeight = MOBILE_MAX_HEIGHT;
-        panel.style.overflowY = "auto";
     }
 
     const title = createElement(ownerDocument, "div", TITLE_CLASS);
     title.setAttribute(TITLE_ATTRIBUTE, "");
     title.textContent = translate("underlineEnhancement");
     panel.appendChild(title);
+
+    const mixedHint = createElement(ownerDocument, "div", MIXED_CLASS);
+    mixedHint.setAttribute(MIXED_ATTRIBUTE, "");
+    mixedHint.textContent = translate("mixedSelection");
+    mixedHint.hidden = true;
+    panel.appendChild(mixedHint);
 
     const sections: Record<TDirection, ISectionWidgets> = {
         underline: buildSection(ownerDocument, "underline", translate),
@@ -438,19 +515,32 @@ export const createPanel = (options: IPanelOptions): IPanelController => {
 
     /** 把面板内部状态画到控件上 */
     const render = (): void => {
+        mixedHint.hidden = !mixed;
         for (const direction of DIRECTIONS) {
             const widgets = sections[direction];
             const decoration = pair[direction];
             const color = sanitizeColor(decoration.color);
             widgets.toggle.checked = decoration.enabled;
+            // 方向关闭时它那两行没有意义，控件禁用掉：面板默认关着上划线，
+            // 留着可点的色块的话，点第一下就替用户做了「开启这个方向」的决定
+            // （关闭态的样式与颜色一改，就等于同时打开了它）。
+            // 禁用的视觉交给思源的 b3-* 样式，这里不另造一套。
             for (const swatch of widgets.styleSwatches) {
                 markSelected(swatch, swatch.getAttribute(STYLE_ATTRIBUTE) === decoration.style);
+                swatch.disabled = !decoration.enabled;
             }
+            widgets.followSwatch.disabled = !decoration.enabled;
             markSelected(widgets.followSwatch, color === "");
             for (const swatch of widgets.colorSwatches) {
                 markSelected(swatch, swatch.getAttribute(COLOR_ATTRIBUTE) === color);
+                swatch.disabled = !decoration.enabled;
             }
-            syncCustomSwatch(ownerDocument, widgets, color);
+            widgets.customInput.disabled = !decoration.enabled;
+            syncCustomSwatch(ownerDocument, widgets, color, {
+                enabled: decoration.enabled,
+                eventName,
+                bind: (value: string) => updateOf[direction]({color: sanitizeColor(value)}),
+            });
             // 块上已有的自定义色既不在预设里、也不跟随文字色，取色器要跟着显示它；
             // 颜色不是 #rrggbb 时不动控件，免得把用户刚挑的颜色抹成黑色
             if (HEX_COLOR_PATTERN.test(color)) {
@@ -472,18 +562,30 @@ export const createPanel = (options: IPanelOptions): IPanelController => {
             return;
         }
         pair = next;
+        // 这次改动会把整个选区统一成面板这一份配置，混合状态随之结束
+        mixed = false;
         render();
         options.onChange(clonePair(pair));
     };
 
+    /** 每个方向提交「只改一个字段」的那条路径；临时色块也是走它 */
+    const updateOf = {} as Record<TDirection, (patch: Partial<IDecoration>) => void>;
+
     for (const direction of DIRECTIONS) {
         const widgets = sections[direction];
         /** 只改该方向的某个字段，其余字段原样带过 */
-        const update = (patch: Partial<IDecoration>): void => {
+        updateOf[direction] = (patch: Partial<IDecoration>): void => {
+            // 方向关闭时线型与颜色两行都是禁用的，这里再挡一道：
+            // 即便事件被程序化派发出来，也不该凭空产生一次改动。
+            // 开关本身要能把它打开，因此只有「没有打开的意图」时才挡。
+            if (patch.enabled === undefined && !pair[direction].enabled) {
+                return;
+            }
             const next = clonePair(pair);
             next[direction] = {...next[direction], ...patch};
             commit(next);
         };
+        const update = updateOf[direction];
         for (const swatch of widgets.styleSwatches) {
             const style = swatch.getAttribute(STYLE_ATTRIBUTE) as TLineStyle;
             swatch.addEventListener(eventName, () => update({style}));
@@ -499,6 +601,11 @@ export const createPanel = (options: IPanelOptions): IPanelController => {
         widgets.customInput.addEventListener("change", () => update({color: sanitizeColor(widgets.customInput.value)}));
     }
     clearButton.addEventListener(eventName, () => {
+        // 清除同样把整个选区统一了，混合状态到此为止
+        if (mixed) {
+            mixed = false;
+            render();
+        }
         options.onClear();
     });
     undoButton.addEventListener(eventName, () => {
@@ -532,12 +639,16 @@ export const createPanel = (options: IPanelOptions): IPanelController => {
 
     return {
         getPair: () => clonePair(pair),
-        setPair: (next: IDecorationPair) => {
+        setPair: (next: IDecorationPair, nextMixed?: boolean) => {
             if (destroyed) {
                 return;
             }
             // 与构造时同一条防线：外部读回的值一律先过白名单，面板内部只持有干净数据
             pair = sanitizePair(next);
+            // 撤销之后各区域的装饰可能又不一样了，调用方重新判一次；没给就沿用当前状态
+            if (nextMixed !== undefined) {
+                mixed = nextMixed;
+            }
             render();
         },
         destroy: () => {

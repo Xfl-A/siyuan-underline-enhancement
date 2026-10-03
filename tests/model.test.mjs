@@ -46,6 +46,36 @@ test("PRESET_COLORS holds ten colors and every one of them passes the whitelist"
     }
 });
 
+test("共享常量都被冻结，导入方改不到会话的回退底座", () => {
+    for (const [name, value] of [["LINE_STYLES", model.LINE_STYLES], ["PRESET_COLORS", model.PRESET_COLORS]]) {
+        assert.equal(Object.isFrozen(value), true, `${name} 必须冻结`);
+    }
+    // 本文件是 ESM（严格模式），往冻结对象上写会抛 TypeError 而不是静默失败；
+    // 对象来自另一个 realm，只能按错误名判定，不能按原型
+    const throwsTypeError = (write) => {
+        assert.throws(write, (error) => error.name === "TypeError");
+    };
+    throwsTypeError(() => model.PRESET_COLORS.push("#000000"));
+    throwsTypeError(() => {
+        model.LINE_STYLES[0] = "zigzag";
+    });
+    // DEFAULT_PAIR 是整条回退链的底座，嵌套的两个方向对象同样不能被改
+    assert.equal(Object.isFrozen(model.DEFAULT_PAIR), true);
+    assert.equal(Object.isFrozen(model.DEFAULT_PAIR.underline), true);
+    assert.equal(Object.isFrozen(model.DEFAULT_PAIR.overline), true);
+    throwsTypeError(() => {
+        model.DEFAULT_PAIR.underline.style = "wavy";
+    });
+    throwsTypeError(() => {
+        model.DEFAULT_PAIR.overline.enabled = true;
+    });
+    assert.deepEqual(toHost(model.DEFAULT_PAIR), {
+        underline: {enabled: true, style: "solid", color: ""},
+        overline: {enabled: false, style: "solid", color: ""},
+    });
+    assert.deepEqual(toHost(model.sanitizePair(null)), toHost(model.DEFAULT_PAIR));
+});
+
 // ---------------------------------------------------------------- composePair
 
 test("composePair returns no span at all when both directions are disabled", () => {

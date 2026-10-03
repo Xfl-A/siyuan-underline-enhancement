@@ -32,11 +32,18 @@ export interface ISpanSpec {
     css: string;
 }
 
-/** 线型枚举，顺序即面板展示顺序 */
-export const LINE_STYLES: readonly TLineStyle[] = ["solid", "dashed", "dotted", "double", "wavy"];
+/**
+ * 线型枚举，顺序即面板展示顺序
+ *
+ * 冻结：这是全插件共享的常量，一旦某个导入方改到它，面板与 sanitizePair 的回退值会一起被带偏，
+ * 而且改动点远在症状之外。freeze 只影响运行时写入，类型仍是 readonly。
+ */
+export const LINE_STYLES: readonly TLineStyle[] = Object.freeze(
+    ["solid", "dashed", "dotted", "double", "wavy"] as TLineStyle[],
+);
 
-/** 预设色板；每一项都通过颜色白名单，自定义色由取色器追加 */
-export const PRESET_COLORS: readonly string[] = [
+/** 预设色板；每一项都通过颜色白名单，自定义色由取色器追加（同样冻结，理由见 LINE_STYLES） */
+export const PRESET_COLORS: readonly string[] = Object.freeze([
     "#e5484d",
     "#f76b15",
     "#ffb224",
@@ -47,13 +54,18 @@ export const PRESET_COLORS: readonly string[] = [
     "#d6409f",
     "#f5d90a",
     "var(--b3-font-color8)",
-];
+]);
 
-/** 默认值：下划线开启并跟随文字颜色，上划线关闭 */
-export const DEFAULT_PAIR: IDecorationPair = {
-    underline: {enabled: true, style: "solid", color: ""},
-    overline: {enabled: false, style: "solid", color: ""},
-};
+/**
+ * 默认值：下划线开启并跟随文字颜色，上划线关闭
+ *
+ * 它是 loadData 读不到东西时整个会话的回退底座，连同两个方向对象一起冻结：
+ * 任何按引用拿到它的地方改字段，整条回退链都会被悄悄污染。
+ */
+export const DEFAULT_PAIR: IDecorationPair = Object.freeze({
+    underline: Object.freeze({enabled: true, style: "solid", color: ""}) as IDecoration,
+    overline: Object.freeze({enabled: false, style: "solid", color: ""}) as IDecoration,
+});
 
 /**
  * 颜色白名单：仅接受十六进制（含 alpha）与思源主题变量。

@@ -20,11 +20,17 @@ where the underline and the overline are configured separately:
   `text-decoration-style` instead of an icon character.
 * **Color**: follow the text color, pick one of 10 preset colors, or use the color input for a custom value.
   A custom value gets its own swatch in the row, so the color in use is always visible.
-* **Clear decoration** removes both directions.
-* **Undo** steps the decoration back one change. It covers the current panel session only: the stack is
-  dropped when the panel closes, so use the document history for anything older.
+* **Clear decoration** removes both directions from the selection.
+* **Undo** steps the decoration back one change — the change _you_ made, including every block it touched.
+  It covers the current panel session only: the stack is dropped when the panel closes, so use the document
+  history for anything older. An entry whose blocks you have edited since is skipped rather than
+  overwriting your later edits.
 * Every change previews live on the selection and is saved on a 300 ms debounce. The last configuration you
   used is remembered and becomes the panel's starting point the next time you select undecorated text.
+* A direction's switch starts **on** for the underline and **off** for the overline. While a direction is
+  off, its line-style row, colour row and colour input are disabled — turn the switch on first.
+* If the regions in one selection do not all carry the same decoration, the panel says so before you click:
+  one change then applies that single configuration to the whole selection.
 
 Decorations are stored as inline styles on `<span>` elements. That is why they keep rendering when the plugin
 is not loaded at all — in read-only mode, on a published page, or when the document is opened elsewhere.
@@ -85,7 +91,10 @@ extracted straight into the plugin directory.
 5. Click outside the panel or press `Esc` to close it. The panel saves on close.
 
 The selection may span paragraphs, list items and table cells; each editable region is wrapped on its own.
-Every affected block is saved separately, so a multi-block change does not depend on a single write.
+Every affected block is saved separately, so a multi-block change does not depend on a single write. One
+exception to list items: a _tight_ list whose item text is a direct child of the `<li>` (no paragraph
+inside the item) yields no editable region, so that text cannot be decorated. See
+[docs/manual-verification.md](docs/manual-verification.md) item 6.
 
 ## Known limitations
 
@@ -98,6 +107,13 @@ Every affected block is saved separately, so a multi-block change does not depen
    panel's **Undo** button or SiYuan's document history to recover.
 3. **Code blocks are not supported.** This matches SiYuan's own floating toolbar, which does not show up for
    code blocks either.
+4. **Changes are scoped to the selected range, not to the whole block.** Applying, restyling and
+   **Clear decoration** only touch decoration inside the selection; decoration elsewhere in the same block
+   is preserved. To restyle or clear decoration outside the selection, select it first.
+5. **Undo covers one recorded change, and only within the current panel session.** All blocks touched by one
+   change are reverted by a single press; an entry is skipped when any of its blocks no longer matches what
+   the change left behind (because you have edited it since). The stack is emptied when the panel closes,
+   so a change is only undoable while the panel that made it is still open.
 
 Read-only mode and published pages are not limitations: the plugin does not register its toolbar button
 there, but decorations keep rendering because they are plain inline styles.
@@ -124,6 +140,10 @@ npm run lint          # ESLint, fixes what it can
 npm run format        # dprint
 npm run format:check  # dprint, report only
 ```
+
+Acceptance on a real SiYuan instance — the parts the unit tests cannot reach (rendering, export, publish,
+read-only, mobile, undo after a re-render, stacking order) — has its own checklist, in English and Chinese:
+[docs/manual-verification.md](docs/manual-verification.md).
 
 The production build is what ships: `dist/` holds the loadable plugin, and `package.zip` holds the same files
 with the `dist/` prefix stripped, ready to extract into a plugin directory.

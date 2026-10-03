@@ -27,6 +27,12 @@ const SOLID_PAIR = {
     overline: {enabled: true, style: "wavy", color: ""},
 };
 
+/** 默认形态：下划线开着、上划线关着（规格 §4 的默认值） */
+const DEFAULT_PAIR = {
+    underline: {enabled: true, style: "solid", color: ""},
+    overline: {enabled: false, style: "solid", color: ""},
+};
+
 /** 合成的 i18n：每个键一个不会与任何真实文案相撞的记号，便于断言「有没有硬编码字面量」 */
 const SENTINELS = {
     underlineEnhancement: "⟦title⟧",
@@ -39,6 +45,12 @@ const SENTINELS = {
     clearDecoration: "⟦clear⟧",
     undo: "⟦undo⟧",
     saveFailed: "⟦saveFailed⟧",
+    mixedSelection: "⟦mixed⟧",
+    styleSolid: "⟦styleSolid⟧",
+    styleDashed: "⟦styleDashed⟧",
+    styleDotted: "⟦styleDotted⟧",
+    styleDouble: "⟦styleDouble⟧",
+    styleWavy: "⟦styleWavy⟧",
 };
 
 /** 一个可辨认的视口坐标矩形 */
@@ -107,6 +119,7 @@ const createFixture = (options = {}) => {
         initialPair,
         i18n: options.i18n ?? i18n,
         undoEnabled: options.undoEnabled ?? false,
+        mixed: options.mixed === true,
         onChange: (pair) => calls.push({type: "change", pair: toHost(pair)}),
         onClear: () => calls.push({type: "clear"}),
         onUndo: () => calls.push({type: "undo"}),
@@ -117,6 +130,7 @@ const createFixture = (options = {}) => {
     const section = (direction) => panel.querySelector(`[data-sue-section="${direction}"]`);
     const switchOf = (direction) => section(direction).querySelector("[data-sue-switch]");
     const styleSwatchesOf = (direction) => Array.from(section(direction).querySelectorAll("[data-sue-style]"));
+    const styleSwatchOf = (direction, style) => section(direction).querySelector(`[data-sue-style="${style}"]`);
     // 预设色块：自定义色的临时色块另带标记，不算预设，因此预设恒为 10 块
     const colorSwatchesOf = (direction) =>
         Array.from(section(direction).querySelectorAll("[data-sue-color]:not([data-sue-custom-swatch])"));
@@ -125,7 +139,9 @@ const createFixture = (options = {}) => {
     const followSwatchOf = (direction) => section(direction).querySelector("[data-sue-follow-color]");
     const customInputOf = (direction) => section(direction).querySelector("[data-sue-custom-color]");
     const labelOf = (direction, row) => section(direction).querySelector(`[data-sue-row="${row}"] [data-sue-label]`);
+    const rowOf = (direction, row) => section(direction).querySelector(`[data-sue-row="${row}"]`);
     const actionButton = (action) => panel.querySelector(`[data-sue-action="${action}"]`);
+    const mixedHint = () => panel.querySelector("[data-sue-mixed]");
 
     const ofType = (type) => calls.filter((call) => call.type === type);
     const changes = () => ofType("change").map((call) => call.pair);
@@ -152,13 +168,16 @@ const createFixture = (options = {}) => {
         section,
         switchOf,
         styleSwatchesOf,
+        styleSwatchOf,
         colorSwatchesOf,
         customSwatchesOf,
         customSwatchOf,
         followSwatchOf,
         customInputOf,
         labelOf,
+        rowOf,
         actionButton,
+        mixedHint,
         changes,
         lastChange,
         countOf,
@@ -243,6 +262,81 @@ test("线型色块禁止空白折叠，预览线才画得满色块", () => {
 });
 
 // ------------------------------------------------------------------ 回填
+
+test("默认形态下上划线方向关闭，它的线型行与颜色行整体禁用", () => {
+    // 默认 pair 就是规格 §4 的那一份：下划线开、上划线关
+    const {switchOf, styleSwatchesOf, colorSwatchesOf, followSwatchOf, customInputOf, close} = createFixture({
+        initialPair: DEFAULT_PAIR,
+    });
+    assert.equal(switchOf("underline").checked, true);
+    assert.equal(switchOf("overline").checked, false);
+    for (
+        const swatch of [...styleSwatchesOf("underline"), ...colorSwatchesOf("underline"), followSwatchOf("underline")]
+    ) {
+        assert.equal(swatch.disabled, false, "开着的方向不该禁用");
+    }
+    assert.equal(customInputOf("underline").disabled, false);
+    for (const swatch of [...styleSwatchesOf("overline"), ...colorSwatchesOf("overline"), followSwatchOf("overline")]) {
+        assert.equal(swatch.disabled, true, "关着的方向，线型与颜色两行都必须禁用");
+    }
+    assert.equal(customInputOf("overline").disabled, true, "取色器同样禁用");
+    close();
+});
+
+test("方向关闭时点击该方向的色块与取色器都不产生改动", () => {
+    // 复现审阅里的误操作：面板默认开着下划线、关着上划线，点上划线那行的蓝色色块
+    // 结果给整段文字加上了实线下划线 —— 用户根本没要求过
+    const {styleSwatchOf, colorSwatchesOf, customInputOf, followSwatchOf, window, changes, close} = createFixture({
+        initialPair: DEFAULT_PAIR,
+    });
+
+    styleSwatchOf("overline", "wavy").click();
+    colorSwatchesOf("overline")[5].click();
+    followSwatchOf("overline").click();
+    const input = customInputOf("overline");
+    input.value = "#123456";
+    input.dispatchEvent(new window.Event("change", {bubbles: true}));
+
+    assert.equal(changes().length, 0, "关着的方向不得因为点色块而改设置");
+    close();
+});
+
+test("方向开关关掉后该方向两行立刻禁用，再打开又恢复可用", () => {
+    const {switchOf, styleSwatchOf, colorSwatchesOf, lastChange, changes, close} = createFixture();
+    assert.equal(styleSwatchOf("overline", "wavy").disabled, false);
+
+    switchOf("overline").click();
+    assert.equal(styleSwatchOf("overline", "wavy").disabled, true, "关掉之后两行要马上禁用");
+    assert.equal(colorSwatchesOf("overline")[0].disabled, true);
+    assert.equal(changes().length, 1);
+
+    switchOf("overline").click();
+    assert.equal(styleSwatchOf("overline", "wavy").disabled, false, "打开之后要恢复可用");
+    assert.equal(colorSwatchesOf("overline")[0].disabled, false);
+
+    styleSwatchOf("overline", "wavy").click();
+    assert.equal(lastChange().overline.style, "wavy");
+    close();
+});
+
+test("线型色块带可读的无障碍名，取色器上的自定义色块同样如此", () => {
+    const {styleSwatchOf, close} = createFixture();
+    // 按钮的唯一内容是两个 EN SPACE，没有名字就只能靠图标形状辨认
+    assert.equal(styleSwatchOf("underline", "solid").getAttribute("aria-label"), "实线 · 下划线");
+    assert.equal(styleSwatchOf("underline", "wavy").getAttribute("aria-label"), "波浪线 · 下划线");
+    assert.equal(styleSwatchOf("overline", "dotted").getAttribute("aria-label"), "点线 · 上划线");
+    // 不能是 CSS 关键词：中文界面里 "wavy" 对用户没有意义
+    for (const direction of ["underline", "overline"]) {
+        for (const style of ["solid", "dashed", "dotted", "double", "wavy"]) {
+            const swatch = styleSwatchOf(direction, style);
+            const label = swatch.getAttribute("aria-label");
+            assert.equal(label, `${i18n[`style${style[0].toUpperCase()}${style.slice(1)}`]} · ${i18n[direction]}`);
+            assert.notEqual(label, style, "无障碍名不能直接用 CSS 关键词");
+            assert.equal(swatch.getAttribute("aria-label"), label, "两个方向各有各的线型色块，名字必须带上方向");
+        }
+    }
+    close();
+});
 
 test("打开时开关的 checked 状态与 initialPair 一致", () => {
     const cases = [
@@ -401,6 +495,67 @@ test("挑了自定义色之后整行只有一个色块被选中，换回预设�
     assert.equal(customSwatchesOf("underline").length, 0, "跟随文字色也要撤掉临时色块");
     assert.equal(followSwatchOf("underline").getAttribute("aria-pressed"), "true");
     assert.equal(selectedCountIn(section("underline")), 1);
+    close();
+});
+
+test("自定义色的临时色块真的可点，与预设色块行为一致", () => {
+    // 这块色块是渲染时才插进来的：只在构造期给预设色块绑事件的话，它就是个长得像按钮的死元素
+    const {customSwatchOf, window, lastChange, changes, close} = createFixture({
+        initialPair: {
+            underline: {enabled: true, style: "solid", color: "#123456"},
+            overline: {enabled: true, style: "solid", color: ""},
+        },
+    });
+    const chip = customSwatchOf("underline");
+    assert.ok(chip, "夹具前提：这里应当有一块自定义色色块");
+    assert.equal(chip.disabled, false, "它是当前正在用的颜色，必须可点");
+
+    // 挑一个别的自定义色
+    const input = chip.ownerDocument.querySelector("[data-sue-custom-color]");
+    input.value = "#654321";
+    input.dispatchEvent(new window.Event("change", {bubbles: true}));
+    assert.equal(lastChange().underline.color, "#654321");
+
+    // 再点回原来的那块：它必须还能接收事件，否则用户只能靠取色器换回同一个颜色
+    chip.click();
+    assert.equal(changes().length, 2);
+    assert.equal(lastChange().underline.color, "#123456");
+    close();
+});
+
+test("方向关闭时临时色块也禁用，不是一个可点却无效的死元素", () => {
+    const {customSwatchOf, changes, close} = createFixture({
+        initialPair: {
+            underline: {enabled: false, style: "solid", color: "#123456"},
+            overline: {enabled: true, style: "solid", color: ""},
+        },
+    });
+    const chip = customSwatchOf("underline");
+    assert.ok(chip);
+    assert.equal(chip.disabled, true, "方向关闭时它不该还能被点");
+    chip.click();
+    assert.equal(changes().length, 0);
+    close();
+});
+
+test("选区内的装饰不一致时面板给出提示，改动一次之后提示消失", () => {
+    const {mixedHint, styleSwatchesOf, changes, close} = createFixture({mixed: true});
+    const hint = mixedHint();
+    assert.ok(hint, "混合选区必须先说清楚再让用户点");
+    assert.equal(hint.hidden, false, "混合状态下提示必须可见");
+    assert.equal(hint.textContent, i18n.mixedSelection, "提示文案取自 i18n");
+    assert.notEqual(hint.textContent.trim(), "");
+
+    styleSwatchesOf("underline")[4].click();
+    // 这次改动把整个选区统一了，提示随之消失
+    assert.equal(changes().length, 1);
+    assert.equal(mixedHint().hidden, true);
+    close();
+});
+
+test("选区内的装饰一致时不显示混合提示", () => {
+    const {mixedHint, close} = createFixture({mixed: false});
+    assert.equal(mixedHint().hidden, true);
     close();
 });
 
@@ -577,6 +732,16 @@ test("面板比视口还高时纵向坐标退到视口内而不是被推到视�
     close();
 });
 
+test("面板给出纵向滚动兜底，窗口太矮时不会被裁掉", () => {
+    // 定位只夹两个轴，不改高度：窗口矮过面板时若没有 max-height，底部直接看不见
+    const {panel, close} = createFixture({
+        rects: {anchor: rect(300, 100, 200, 40), panel: rect(0, 0, 300, 900)},
+    });
+    assert.match(panel.style.maxHeight, /vh$/, "面板必须限高");
+    assert.equal(panel.style.overflowY, "auto", "超出时改为纵向滚动");
+    close();
+});
+
 test("移动端前端改用 touchend 绑定，并给面板加上滚动兜底", () => {
     const {panel, document, styleSwatchesOf, fire, changes, lastChange, countOf, close} = createFixture({
         frontend: "mobile",
@@ -652,7 +817,13 @@ test("面板实际用到的每个 i18n 键在两种语言的真实文件里都�
             "customColor",
             "followTextColor",
             "lineStyle",
+            "mixedSelection",
             "overline",
+            "styleDashed",
+            "styleDotted",
+            "styleDouble",
+            "styleSolid",
+            "styleWavy",
             "underline",
             "underlineEnhancement",
             "undo",

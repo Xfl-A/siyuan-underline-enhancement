@@ -18,6 +18,12 @@ export interface IEditableGroup {
     end: number;
 }
 
+/** 区域内的一段字符偏移 [start, end)；给出它就表示「只碰这一段」 */
+export interface IOffsetRange {
+    start: number;
+    end: number;
+}
+
 /** 装饰 span 的标记属性；值为下划线 u、上划线 o、两者合并 b */
 const MARK_ATTRIBUTE = "data-sue";
 
@@ -258,12 +264,36 @@ const unwrap = (node: Node): void => {
 };
 
 /**
- * 剥掉区域内全部装饰 span，只改嵌套关系，不动一个字。
- * 没有装饰时是空操作，因此「首次应用」与「改设置」可以走同一条路径，避免半新半旧的样式残留。
+ * 区域内的装饰 span，文档顺序。
+ *
+ * 给出 range 时只保留与它相交的那些。range 为 null 表示「整块都算」，
+ * 相交判定与读取样式（readDecorationStylesIn）走同一条 range，避免「面板读到的是选区内的装饰、
+ * 剥的却是整块」这种自相矛盾。
  */
-export const stripDecorationIn = (editableElement: HTMLElement): void => {
-    const spans = editableElement.querySelectorAll(`[${MARK_ATTRIBUTE}]`);
+const decorationSpansIn = (editableElement: HTMLElement, range: Range | null): HTMLElement[] => {
+    const spans = Array.from(editableElement.querySelectorAll(`[${MARK_ATTRIBUTE}]`)) as HTMLElement[];
+    if (range === null) {
+        return spans;
+    }
+    return spans.filter((span) => range.intersectsNode(span));
+};
+
+/**
+ * 剥掉区域内的装饰 span，只改嵌套关系，不动一个字。
+ *
+ * 给出范围时只剥与 [start, end) 相交的 span：同一个块里的装饰可能整块落在选区之外，
+ * 那是用户此前已经保存下来的另一处改动，按区域整块剥掉会把它从编辑器里删掉、并随
+ * 这次保存一起落盘（审阅里复现的就是「先给一个词加线，再给同段另一个词加线」，
+ * 前一次装饰无声消失）。范围用区域内字符偏移表达，与 applySpansIn 同一坐标系。
+ *
+ * 不给范围即整块清理。生产代码里没有任何地方需要它：面板的作用域始终是打开时记下的
+ * 那个选区范围，「清除装饰」也是 applySpansIn(specs = [])，因此同样只清选区内的装饰。
+ * 保留这个无范围形态是为了让「清掉整个区域」这件事仍然显式可写，而不是被顺手带出来。
+ */
+export const stripDecorationIn = (editableElement: HTMLElement, offsets?: IOffsetRange): void => {
+    const range = offsets === undefined ? null : createRangeIn(editableElement, offsets.start, offsets.end);
     // 从最内层开始拆：内层搬走的子节点正是外层要接着搬的
+    const spans = decorationSpansIn(editableElement, range);
     for (let i = spans.length - 1; i >= 0; i--) {
         unwrap(spans[i]);
     }
@@ -392,11 +422,13 @@ const cleanupIn = (editableElement: HTMLElement): void => {
  * 在区域内按字符偏移包裹装饰 span。
  *
  * 顺序是「先剥后包」：剥 span 不改变 textContent，所以此时这些偏移仍指向同一批文字。
+ * 只剥与 [start, end) 相交的旧装饰，落在范围之外的保持原样 —— 同一个块里的另一处装饰是用户
+ * 此前已经保存好的改动，不该被这次设置顺带抹掉。
  * specs 与 composePair 一致、外层在前，因此从末尾向前包裹，落到 DOM 上的是外层 span 包着内层 span。
- * 空 specs 的语义是清除装饰；空区间或区域内没有文本节点时什么也不包。
+ * 空 specs 的语义是清除装饰（同样只清选区内的那部分）；空区间或区域内没有文本节点时什么也不包。
  */
 export const applySpansIn = (editableElement: HTMLElement, start: number, end: number, specs: ISpanSpec[]): void => {
-    stripDecorationIn(editableElement);
+    stripDecorationIn(editableElement, {start, end});
     let range = end > start ? createRangeIn(editableElement, start, end) : null;
     if (range !== null) {
         for (let i = specs.length - 1; i >= 0; i--) {
@@ -454,12 +486,8 @@ export const readDecorationStylesIn = (
     end: number,
 ): string[] => {
     const range = end > start ? createRangeIn(editableElement, start, end) : null;
-    const spans = editableElement.querySelectorAll(`[${MARK_ATTRIBUTE}]`);
     const styles: string[] = [];
-    for (const span of spans) {
-        if (range !== null && !range.intersectsNode(span)) {
-            continue;
-        }
+    for (const span of decorationSpansIn(editableElement, range)) {
         styles.push(span.getAttribute("style"));
         if (styles.length === MAX_PAIR_SPANS) {
             break;

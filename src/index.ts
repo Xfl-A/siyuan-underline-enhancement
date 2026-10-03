@@ -27,6 +27,7 @@ import {UNDERLINE_ICON_SVG} from "./icons";
 import {
     DEFAULT_PAIR,
     composePair,
+    isSamePair,
     readPairFromStyle,
     sanitizePair,
 } from "./model";
@@ -44,7 +45,10 @@ import {
     recordChange,
     undoLastChange,
 } from "./persist";
-import type {IDebouncedSaver} from "./persist";
+import type {
+    IBlockChange,
+    IDebouncedSaver,
+} from "./persist";
 
 /** 工具栏项的稳定标识：addToolbarItem 的 name 与 removeToolbarItem 的实参取自同一个常量 */
 export const TOOLBAR_ITEM_NAME = "underline-enhancement";
@@ -169,11 +173,15 @@ export default class UnderlineEnhancement extends Plugin {
         toolbar.subElementCloseCB = () => {
             this.closePanel();
         };
+        const current = this.readCurrentPair();
         this.panelOptions = {
             anchor: toolbar.element,
-            initialPair: this.readCurrentPair(),
+            initialPair: current.pair,
             i18n: this.i18n as Record<string, string>,
             undoEnabled: hasUndoableChange(),
+            // 选区里各区域的装饰不一致：面板要先说明再让用户点，
+            // 否则第一下点击就会把没打算动的区域一并改写
+            mixed: current.mixed,
             onChange: (pair: IDecorationPair) => this.applyPair(pair),
             // 清除装饰就是提交一组两个方向都关闭的配置
             onClear: () => this.applyPair(CLEARED_PAIR),
@@ -190,22 +198,31 @@ export default class UnderlineEnhancement extends Plugin {
      *
      * 分组是打开面板时记下的，不会随面板里的点击而变：点击面板控件会让编辑器的选区塌掉，
      * 真正可靠的坐标只有这里记下的字符偏移。
+     *
+     * 一个分组动到几个块就记几条块记录，但它们合起来只占撤销栈里的一条：用户做的是一次操作，
+     * 按一次撤销就该整体退回，而不是只退回最后一个块。
      */
     private applyPair(pair: IDecorationPair): void {
         const specs = composePair(sanitizePair(pair));
+        const changed: IBlockChange[] = [];
         for (const group of this.groups) {
             const blockElement = group.blockElement;
             const beforeHTML = blockElement.outerHTML;
             applySpansIn(group.editableElement, group.start, group.end, specs);
             const afterHTML = blockElement.outerHTML;
             const blockId = blockElement.getAttribute(NODE_ID_ATTRIBUTE);
-            // 没有块 id 的区域无从保存，也不进撤销栈；改动前的 HTML 与改后相同的不必记
-            if (blockId !== null && beforeHTML !== afterHTML) {
-                recordChange(blockId, beforeHTML, afterHTML);
+            // 改动前与改后完全相同（选区里本来就没有装饰，或清了个空）时既不记也不发请求；
+            // 没有块 id 的区域同样无从保存 —— 记账键只能是块自己的 id，
+            // 传个 null 进防抖保存器只会在保存失败时弹一条对不上的提示
+            if (blockId === null || beforeHTML === afterHTML) {
+                continue;
             }
+            changed.push({blockId, beforeHTML, afterHTML});
             // 记账键必须是元素自己的块 id：传错会把多个块并成一次保存，只有最后一个落盘
             this.saver.save(blockId, blockElement);
         }
+        // 一次操作只记一条记录：跨块的改动合起来撤一次
+        recordChange(changed);
         // 重建选区，用户可以接着输入，面板的下一次改动也还有坐标可用
         restoreOffsets(this.offsets);
         this.appliedPair = sanitizePair(pair);
@@ -224,7 +241,8 @@ export default class UnderlineEnhancement extends Plugin {
                 return;
             }
             this.claimBlocks();
-            this.syncPanel(this.readCurrentPair());
+            const current = this.readCurrentPair();
+            this.syncPanel(current.pair, current.mixed);
         } finally {
             this.undoing = false;
         }
@@ -254,21 +272,31 @@ export default class UnderlineEnhancement extends Plugin {
     }
 
     /**
-     * 打开面板时的初值：先看选区里已有的装饰，没有就用上次用过的配置。
+     * 打开面板时的初值，以及选区里的装饰是不是一致的。
+     *
+     * 每个分组各自读一遍选区内的装饰，不能只看第一个：跨块选区里只有第二块被装饰过时，
+     * 拿着默认值开场会让用户第一下点击就把第二块的装饰改掉，而且看上去完全正常。
      *
      * 方向不靠 span 的嵌套位置判断，而是交给 readPairFromStyle 从各自的 text-decoration-line 读：
      * 嵌套时外层是上划线、内层是下划线，合并成一个 data-sue="b" 的 span 则同时供给两个方向。
      * 装饰只在选区范围内找：块里落在选区之外的装饰不描述当前这次选择。
+     *
+     * 各分组一致时就用那一份；不一致时取第一份有装饰的，并如实报出「混合」，
+     * 由面板先把这件事说清楚 —— 一次改动会把整个选区统一，用户该在点之前就知道。
+     * 全都没有装饰时回到上次用过的配置，没有记录就用默认值。
      */
-    private readCurrentPair(): IDecorationPair {
-        const group = this.groups[0];
-        const styles = readDecorationStylesIn(group.editableElement, group.start, group.end);
-        const pair = readPairFromStyle(styles[0] ?? null, styles[1] ?? null);
-        if (pair.underline.enabled || pair.overline.enabled) {
-            return pair;
+    private readCurrentPair(): {pair: IDecorationPair; mixed: boolean;} {
+        const pairs = this.groups.map((group) => {
+            const styles = readDecorationStylesIn(group.editableElement, group.start, group.end);
+            return readPairFromStyle(styles[0] ?? null, styles[1] ?? null);
+        });
+        const decorated = pairs.filter((pair) => pair.underline.enabled || pair.overline.enabled);
+        if (decorated.length === 0) {
+            return {pair: this.rememberedPair ?? DEFAULT_PAIR, mixed: false};
         }
-        // 选区里没有装饰：回到上次用过的配置，没有记录就用默认值
-        return this.rememberedPair ?? DEFAULT_PAIR;
+        const first = decorated[0];
+        const mixed = pairs.some((pair) => !isSamePair(pair, first));
+        return {pair: first, mixed};
     }
 
     /**
@@ -277,12 +305,12 @@ export default class UnderlineEnhancement extends Plugin {
      * 清除与撤销都直接改文档，面板自己看不到结果（setPair 也不会触发 onChange，否则会再来一轮改动）。
      * undoEnabled 就地改面板持有的实参对象，面板重画时重读它。
      */
-    private syncPanel(pair: IDecorationPair): void {
+    private syncPanel(pair: IDecorationPair, mixed = false): void {
         if (this.panelOptions === null) {
             return;
         }
         this.panelOptions.undoEnabled = hasUndoableChange();
-        this.panel.setPair(pair);
+        this.panel.setPair(pair, mixed);
     }
 
     /** 关闭面板；可重复调用，也可以发生在面板从未打开过的情况下 */

@@ -16,6 +16,14 @@
   font-weight: bold;
 }
 
+/* 「选区装饰不一致」的提示：弱化的一行说明文字。只定排版，不做成输入框 */
+[data-sue-panel] .sue-mixed {
+  margin-bottom: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  opacity: 0.75;
+}
+
 [data-sue-panel] .sue-section {
   margin-bottom: 8px;
 }

@@ -8,5 +8,11 @@
   "customColor": "Custom color",
   "clearDecoration": "Clear decoration",
   "undo": "Undo",
-  "saveFailed": "Unable to save the decoration"
+  "saveFailed": "Unable to save the decoration",
+  "mixedSelection": "The decorations in the selection differ: changing anything applies this one configuration to every area in the selection.",
+  "styleSolid": "Solid",
+  "styleDashed": "Dashed",
+  "styleDotted": "Dotted",
+  "styleDouble": "Double",
+  "styleWavy": "Wavy"
 }

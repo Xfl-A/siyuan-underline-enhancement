@@ -24,8 +24,11 @@ const editor = (blocks) => `<div class="b3-editor" id="editor" contenteditable="
 const UNDERLINE_CSS = "text-decoration-line: underline; text-decoration-style: solid";
 const DOTTED_CSS = "text-decoration-line: underline; text-decoration-style: dotted; text-decoration-color: #0090ff";
 const OVERLINE_CSS = "text-decoration-line: overline; text-decoration-style: double";
+const WAVY_CSS = "text-decoration-line: underline; text-decoration-style: wavy";
 const underlineSpec = (css = UNDERLINE_CSS) => ({position: "underline", marker: "u", css});
 const overlineSpec = (css = OVERLINE_CSS) => ({position: "overline", marker: "o", css});
+/** 夹具里的一块装饰 span，属性顺序与插件写出的形态一致，便于逐字节比对 */
+const markedSpan = (css, text) => `<span data-sue="u" style="${css}">${text}</span>`;
 const ZWSP = "\u200b";
 
 const emptyTextNodes = (root) => textNodesOf(root).filter((node) => node.data === "");
@@ -485,6 +488,33 @@ test("stripDecorationIn leaves strong and a elements that carry no data-sue mark
     cleanup();
 });
 
+test("stripDecorationIn without a range clears the whole region, which is the explicit region-wide mode", () => {
+    const cleanup = mount(editor(
+        `<p data-type="text" data-node-id="p1">${markedSpan(UNDERLINE_CSS, "abc")} tail</p>`,
+    ));
+    const paragraph = document.querySelector("p");
+
+    stripDecorationIn(paragraph);
+
+    assert.deepEqual(decorationsIn(paragraph), [], "不给范围即整块清理，这是唯一走到区域级清理的入口");
+    assert.equal(paragraph.innerHTML, "abc tail", "解包后只剩裸文本");
+    cleanup();
+});
+
+test("stripDecorationIn with a range leaves decoration outside that range untouched", () => {
+    const cleanup = mount(editor(
+        `<p data-type="text" data-node-id="p1">plain ${markedSpan(DOTTED_CSS, "decorated")} tail</p>`,
+    ));
+    const paragraph = document.querySelector("p");
+
+    // 只覆盖前 6 个字符（"plain "），落在范围之外的那块装饰必须原样留下
+    stripDecorationIn(paragraph, {start: 0, end: 6});
+
+    assert.deepEqual(decorationsIn(paragraph), [{marker: "u", style: DOTTED_CSS, text: "decorated"}]);
+    assert.equal(paragraph.innerHTML, `plain ${markedSpan(DOTTED_CSS, "decorated")} tail`);
+    cleanup();
+});
+
 // ---------------------------------------------------------------- applySpansIn
 
 test("applySpansIn wraps the selected text in one span and leaves the adjacent text out of it", () => {
@@ -668,6 +698,105 @@ test("applySpansIn does not duplicate a block id when it wraps one paragraph of 
     assert.deepEqual(blockIDsIn(cell), ["c1", "c2"], "块 id 必须唯一，且没有多出来的空壳块");
     assert.deepEqual(decorationsIn(cell), [{marker: "u", style: UNDERLINE_CSS, text: "第一段"}]);
     assert.equal(cell.textContent, before);
+    cleanup();
+});
+
+test("applySpansIn restyles the selected range and keeps decoration elsewhere in the block byte-identical", () => {
+    // 先装饰 "decorated"，再只选中它前面的 "plain " 换成波浪线
+    const cleanup = mount(editor(
+        `<p data-type="text" data-node-id="p1">plain ${markedSpan(DOTTED_CSS, "decorated")} tail</p>`,
+    ));
+    const paragraph = document.querySelector("p");
+    const kept = markedSpan(DOTTED_CSS, "decorated");
+
+    applySpansIn(paragraph, 0, 6, [underlineSpec(WAVY_CSS)]);
+
+    // 「给第一个词加下划线，再给同段第二个词加下划线」是最普通的用法；
+    // 按区域整块剥的话，第一次加的装饰会连同它已落盘的 HTML 一起消失
+    assert.equal(
+        paragraph.innerHTML,
+        `${markedSpan(WAVY_CSS, "plain ")}${kept} tail`,
+        "选区之外的装饰必须逐字节保留，不能只换个位置就算数",
+    );
+    assert.deepEqual(
+        decorationsIn(paragraph),
+        [
+            {marker: "u", style: WAVY_CSS, text: "plain "},
+            {marker: "u", style: DOTTED_CSS, text: "decorated"},
+        ],
+    );
+    assert.equal(paragraph.textContent, "plain decorated tail");
+    cleanup();
+});
+
+test("applySpansIn keeps every untouched decoration in a table cell that holds two decorated words", () => {
+    const cleanup = mount(editor(
+        `<table class="b3-table" data-type="blockTable" data-node-id="table1"><tbody><tr>
+            <td data-type="blockTableCell"><p data-type="text" data-node-id="c1">alpha ${
+            markedSpan(DOTTED_CSS, "beta")
+        } gamma ${markedSpan(DOTTED_CSS, "delta")}</p></td>
+        </tr></tbody></table>`,
+    ));
+    const cell = document.querySelector("td");
+    assert.equal(cell.textContent, "alpha beta gamma delta");
+    const keptBeta = markedSpan(DOTTED_CSS, "beta");
+    const keptDelta = markedSpan(DOTTED_CSS, "delta");
+
+    // 可编辑区域是 TD 本身，偏移相对 TD 的 textContent：gamma 落在 11..16
+    applySpansIn(cell, 11, 16, [underlineSpec(WAVY_CSS)]);
+
+    assert.equal(
+        cell.querySelector("p").innerHTML,
+        `alpha ${keptBeta} ${markedSpan(WAVY_CSS, "gamma")} ${keptDelta}`,
+        "单元格里另外两块装饰都不能被顺手剥掉",
+    );
+    assert.deepEqual(
+        decorationsIn(cell),
+        [
+            {marker: "u", style: DOTTED_CSS, text: "beta"},
+            {marker: "u", style: WAVY_CSS, text: "gamma"},
+            {marker: "u", style: DOTTED_CSS, text: "delta"},
+        ],
+    );
+    assert.equal(cell.textContent, "alpha beta gamma delta");
+    cleanup();
+});
+
+test("applySpansIn with empty specs clears the selected range and leaves decoration outside it", () => {
+    const cleanup = mount(editor(
+        `<p data-type="text" data-node-id="p1">${markedSpan(DOTTED_CSS, "alpha")} tail ${
+            markedSpan(DOTTED_CSS, "gamma")
+        }</p>`,
+    ));
+    const paragraph = document.querySelector("p");
+
+    // 「清除装饰」走的是同一条路径，因此它的作用域同样是选区而不是整块
+    applySpansIn(paragraph, 0, 5, []);
+
+    assert.equal(paragraph.innerHTML, `alpha tail ${markedSpan(DOTTED_CSS, "gamma")}`);
+    assert.equal(paragraph.textContent, "alpha tail gamma");
+    cleanup();
+});
+
+test("applySpansIn strips an outer span that only partly overlaps while its inner span keeps its own decoration", () => {
+    // 外层上划线罩着整段，内层下划线只罩着后半段；选区只覆盖前半段
+    const cleanup = mount(editor(
+        `<p data-type="text" data-node-id="p1"><span data-sue="o" style="${OVERLINE_CSS}">ab` +
+            `<span data-sue="u" style="${DOTTED_CSS}">cd</span></span></p>`,
+    ));
+    const paragraph = document.querySelector("p");
+
+    applySpansIn(paragraph, 0, 2, [underlineSpec(WAVY_CSS)]);
+
+    // 前半段换成新的下划线，后半段自己的装饰既不能丢也不能被新样式盖住
+    assert.deepEqual(
+        decorationsIn(paragraph),
+        [
+            {marker: "u", style: WAVY_CSS, text: "ab"},
+            {marker: "u", style: DOTTED_CSS, text: "cd"},
+        ],
+    );
+    assert.equal(paragraph.textContent, "abcd");
     cleanup();
 });
 

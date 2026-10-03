@@ -355,22 +355,98 @@ test("createDebouncedSaver cancel clears only the named block and cancel() clear
 
 // ---------------------------------------------------------------- 撤销栈
 
+/** 一次改动涉及的某个块：块 id 与改动前后的块 HTML */
+const blockChange = (blockId, beforeHTML, afterHTML) => ({blockId, beforeHTML, afterHTML});
+
 test("recordChange makes the session undoable", () => {
     const {module, mount, close} = createFixture();
     const [block] = mount(blockHTML(BLOCK_A, "a0"));
     assert.equal(module.hasUndoableChange(), false, "没有记录时不能报可撤销");
 
-    module.recordChange(BLOCK_A, block.outerHTML, decoratedHTML(BLOCK_A, "a0"));
+    module.recordChange([blockChange(BLOCK_A, block.outerHTML, decoratedHTML(BLOCK_A, "a0"))]);
 
     assert.equal(module.hasUndoableChange(), true);
+    close();
+});
+
+test("a two-block record is one undo entry, not one per block", async () => {
+    const {module, mount, findBlock, server, close} = createFixture();
+    mount(blockHTML(BLOCK_A, "a0"), blockHTML(BLOCK_B, "b0"));
+    const a0 = findBlock(BLOCK_A).outerHTML;
+    const b0 = findBlock(BLOCK_B).outerHTML;
+    // 一次跨块操作：两个块的前后 HTML 记在同一条记录里
+    module.recordChange([
+        blockChange(BLOCK_A, a0, decoratedHTML(BLOCK_A, "a0")),
+        blockChange(BLOCK_B, b0, decoratedHTML(BLOCK_B, "b0")),
+    ]);
+    mount(decoratedHTML(BLOCK_A, "a0"), decoratedHTML(BLOCK_B, "b0"));
+
+    assert.equal(await module.undoLastChange(), true);
+    assert.equal(
+        module.hasUndoableChange(),
+        false,
+        "一次操作只占一条记录：撤一次就该空了。按块各记一条的话这里还会剩一次",
+    );
+    assert.equal(await module.undoLastChange(), false, "不该有第二次可撤");
+    assert.equal(server.calls.length, 2, "一次操作只发两个块各自的写回");
+    assert.equal(findBlock(BLOCK_A).outerHTML, a0);
+    assert.equal(findBlock(BLOCK_B).outerHTML, b0);
+    close();
+});
+
+test("undoLastChange reverts every block of one action in a single press", async () => {
+    const {module, mount, findBlock, server, close} = createFixture();
+    mount(blockHTML(BLOCK_A, "a0"), blockHTML(BLOCK_B, "b0"));
+    const a0 = findBlock(BLOCK_A).outerHTML;
+    const b0 = findBlock(BLOCK_B).outerHTML;
+    module.recordChange([
+        blockChange(BLOCK_A, a0, decoratedHTML(BLOCK_A, "a0")),
+        blockChange(BLOCK_B, b0, decoratedHTML(BLOCK_B, "b0")),
+    ]);
+    mount(decoratedHTML(BLOCK_A, "a0"), decoratedHTML(BLOCK_B, "b0"));
+
+    const undone = await module.undoLastChange();
+
+    // 一次跨两段的操作必须按一次撤销就整体退回：退一半比不退更难察觉
+    assert.equal(undone, true);
+    assert.deepEqual(server.calls.map((call) => callOf(call).data.id), [BLOCK_A, BLOCK_B]);
+    assert.equal(findBlock(BLOCK_A).outerHTML, a0);
+    assert.equal(findBlock(BLOCK_B).outerHTML, b0);
+    assert.equal(module.hasUndoableChange(), false, "一次操作只占一条记录，撤销之后栈就该空了");
+    assert.equal(server.calls.length, 2);
+    close();
+});
+
+test("undoLastChange discards a multi-block entry when any one of its blocks no longer matches", async () => {
+    const {module, mount, findBlock, server, close} = createFixture();
+    mount(blockHTML(BLOCK_A, "a0"), blockHTML(BLOCK_B, "b0"));
+    const a0 = findBlock(BLOCK_A).outerHTML;
+    const b0 = findBlock(BLOCK_B).outerHTML;
+    module.recordChange([
+        blockChange(BLOCK_A, a0, decoratedHTML(BLOCK_A, "a0")),
+        blockChange(BLOCK_B, b0, decoratedHTML(BLOCK_B, "b0")),
+    ]);
+    mount(decoratedHTML(BLOCK_A, "a0"), decoratedHTML(BLOCK_B, "b0"));
+    // 用户在 B 块里接着打字：这条记录里 B 的 afterHTML 已经过期
+    const blockB = findBlock(BLOCK_B);
+    blockB.appendChild(blockB.ownerDocument.createTextNode("后来补的字"));
+    const bText = findBlock(BLOCK_B).textContent;
+
+    const undone = await module.undoLastChange();
+
+    assert.equal(undone, false, "只要有一个块对不上，整条记录就不能回滚");
+    assert.equal(server.calls.length, 0, "过期的记录一个块也不能写回");
+    assert.equal(findBlock(BLOCK_A).outerHTML, decoratedHTML(BLOCK_A, "a0"), "A 块不能被单独回滚");
+    assert.equal(findBlock(BLOCK_B).textContent, bText);
+    assert.equal(module.hasUndoableChange(), false);
     close();
 });
 
 test("clearChanges empties the session undo stack", () => {
     const {module, mount, close} = createFixture();
     const [blockA, blockB] = mount(blockHTML(BLOCK_A, "a0"), blockHTML(BLOCK_B, "b0"));
-    module.recordChange(BLOCK_A, blockA.outerHTML, decoratedHTML(BLOCK_A, "a0"));
-    module.recordChange(BLOCK_B, blockB.outerHTML, decoratedHTML(BLOCK_B, "b0"));
+    module.recordChange([blockChange(BLOCK_A, blockA.outerHTML, decoratedHTML(BLOCK_A, "a0"))]);
+    module.recordChange([blockChange(BLOCK_B, blockB.outerHTML, decoratedHTML(BLOCK_B, "b0"))]);
     assert.equal(module.hasUndoableChange(), true);
 
     module.clearChanges();
@@ -385,7 +461,7 @@ test("undoLastChange writes beforeHTML back to the kernel and replaces the block
     const beforeHTML = block.outerHTML;
     // 模拟面板应用装饰：块 DOM 被重排，随后保存到服务端
     block.innerHTML = `<span data-sue="u" style="${UNDERLINE_CSS}">a0</span>`;
-    module.recordChange(BLOCK_A, beforeHTML, block.outerHTML);
+    module.recordChange([blockChange(BLOCK_A, beforeHTML, block.outerHTML)]);
     assert.equal(await module.saveBlockDOM(block), true);
     server.calls.length = 0;
 
@@ -408,8 +484,8 @@ test("undoLastChange skips a stale entry instead of overwriting edits made after
     mount(blockHTML(BLOCK_A, "a0"), blockHTML(BLOCK_B, "b0"));
     const a0 = findBlock(BLOCK_A).outerHTML;
     const b0 = findBlock(BLOCK_B).outerHTML;
-    module.recordChange(BLOCK_A, a0, decoratedHTML(BLOCK_A, "a0"));
-    module.recordChange(BLOCK_B, b0, decoratedHTML(BLOCK_B, "b0"));
+    module.recordChange([blockChange(BLOCK_A, a0, decoratedHTML(BLOCK_A, "a0"))]);
+    module.recordChange([blockChange(BLOCK_B, b0, decoratedHTML(BLOCK_B, "b0"))]);
     mount(decoratedHTML(BLOCK_A, "a0"), decoratedHTML(BLOCK_B, "b0"));
     // 用户在装饰之后又在 B 块里接着打字：记录里的 afterHTML 已经对不上当前 DOM
     const blockB = findBlock(BLOCK_B);
@@ -431,8 +507,8 @@ test("undoLastChange drops an entry whose block is no longer in the document", a
     const {module, mount, findBlock, server, close} = createFixture();
     mount(blockHTML(BLOCK_A, "a0"), blockHTML(BLOCK_B, "b0"));
     const a0 = findBlock(BLOCK_A).outerHTML;
-    module.recordChange(BLOCK_A, a0, decoratedHTML(BLOCK_A, "a0"));
-    module.recordChange(BLOCK_B, blockHTML(BLOCK_B, "b0"), decoratedHTML(BLOCK_B, "b0"));
+    module.recordChange([blockChange(BLOCK_A, a0, decoratedHTML(BLOCK_A, "a0"))]);
+    module.recordChange([blockChange(BLOCK_B, blockHTML(BLOCK_B, "b0"), decoratedHTML(BLOCK_B, "b0"))]);
     // B 块被删除、或用户已切走文档：这条记录再也无从校验与写回
     mount(decoratedHTML(BLOCK_A, "a0"));
 
@@ -449,7 +525,7 @@ test("undoLastChange finds a block whose node id would not survive a selector lo
     const {module, editor, mount, findBlock, server, close} = createFixture();
     mount(blockHTML(BLOCK_QUOTED, "q0"));
     const beforeHTML = findBlock(BLOCK_QUOTED).outerHTML;
-    module.recordChange(BLOCK_QUOTED, beforeHTML, decoratedHTML(BLOCK_QUOTED, "q0"));
+    module.recordChange([blockChange(BLOCK_QUOTED, beforeHTML, decoratedHTML(BLOCK_QUOTED, "q0"))]);
     mount(decoratedHTML(BLOCK_QUOTED, "q0"));
     // 夹具前提：把这个 id 拼进属性选择器字面量会直接抛错，被测实现一旦走那条路，用例就红
     assert.throws(() => editor.querySelector(`[data-node-id="${BLOCK_QUOTED}"]`));
@@ -468,7 +544,7 @@ test("undoLastChange keeps the record and the DOM untouched when the write-back 
     const beforeHTML = block.outerHTML;
     block.innerHTML = `<span data-sue="u" style="${UNDERLINE_CSS}">a0</span>`;
     const afterHTML = block.outerHTML;
-    module.recordChange(BLOCK_A, beforeHTML, afterHTML);
+    module.recordChange([blockChange(BLOCK_A, beforeHTML, afterHTML)]);
     server.respondWith({code: -1, msg: "read-only", data: null});
 
     assert.equal(await module.undoLastChange(), false);
@@ -491,7 +567,7 @@ test("undoLastChange rolls back no further than the oldest entry left once 60 ch
     // 每改一次就落一次盘：块 DOM 跟着前进，撤销栈与真实状态同步增长
     for (let step = 1; step <= 60; step++) {
         editor.innerHTML = stateHTML(step - 1);
-        module.recordChange(BLOCK_A, stateHTML(step - 1), stateHTML(step));
+        module.recordChange([blockChange(BLOCK_A, stateHTML(step - 1), stateHTML(step))]);
         editor.innerHTML = stateHTML(step);
     }
     assert.equal(findBlock(BLOCK_A).outerHTML, stateHTML(60));

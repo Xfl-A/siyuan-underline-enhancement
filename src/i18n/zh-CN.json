@@ -8,5 +8,11 @@
   "customColor": "自定义颜色",
   "clearDecoration": "清除装饰",
   "undo": "撤销",
-  "saveFailed": "装饰保存失败"
+  "saveFailed": "装饰保存失败",
+  "mixedSelection": "选区内的装饰并不一致：改动任一项都会把选区里的所有区域统一成这一份配置。",
+  "styleSolid": "实线",
+  "styleDashed": "虚线",
+  "styleDotted": "点线",
+  "styleDouble": "双线",
+  "styleWavy": "波浪线"
 }
