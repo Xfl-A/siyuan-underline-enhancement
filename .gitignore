@@ -13,3 +13,7 @@ kernel.js
 # 仅为开发期参考拉取的上游仓库，不属于本插件
 /_siyuan
 /_template
+
+# 本地开发工作区
+/.worktrees
+/.superpowers
