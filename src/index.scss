@@ -1,1 +1,87 @@
-// 骨架占位：面板样式由 Task 5 填充，此处不包含任何规则。
+// 浮动面板的样式：只描述排布与尺寸，控件外观一律沿用思源既有的 b3-* 类。
+// 因此这里刻意不覆盖控件的高度、内边距、字体、边框、阴影与悬浮态，
+// 只在选中态补一圈指示色，让「哪一项被选中」在主题之外也读得出来。
+//
+// 根选择器用 [data-sue-panel]：面板挂在 document.body 上，必须能被本样式表认出来。
+
+[data-sue-panel] {
+  z-index: 100;
+  width: 300px;
+  max-width: calc(100vw - 24px);
+  box-sizing: border-box;
+}
+
+[data-sue-panel] [data-sue-title] {
+  margin-bottom: 4px;
+  font-weight: bold;
+}
+
+[data-sue-panel] .sue-section {
+  margin-bottom: 8px;
+}
+
+/* 行沿用思源的 b3-list-item，这里只补间距与换行；排布自己写全，免得依赖对方实现的细节 */
+[data-sue-panel] .sue-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* 标签不参与伸缩：控件侧靠 justify-content: space-between 贴到行尾，窄屏时整行换行 */
+[data-sue-panel] .sue-label {
+  flex: 0 0 auto;
+}
+
+/* 控件侧统一右对齐并允许换行：色块多的时候折行，而不是把面板撑出视口 */
+[data-sue-panel] .sue-control,
+[data-sue-panel] .sue-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+/* 色块只定尺寸与排列，边框、背景与悬浮态沿用 b3-button */
+[data-sue-panel] .sue-swatch {
+  width: 26px;
+}
+
+[data-sue-panel] .sue-color-input {
+  width: 28px;
+}
+
+/* 选中态：向外扩一圈，不盖住色块自身的颜色 */
+[data-sue-panel] .sue-swatch--selected {
+  box-shadow: 0 0 0 2px var(--b3-primary-color, var(--b3-theme-color, currentColor));
+}
+
+[data-sue-panel] [data-sue-actions] {
+  gap: 8px;
+}
+
+/* 移动端由面板加上的标记：触控目标放大到 32px；滚动兜底由面板的内联样式给出 */
+[data-sue-panel][data-sue-mobile] .sue-swatches {
+  gap: 6px;
+}
+
+[data-sue-panel][data-sue-mobile] .sue-swatch {
+  width: 32px;
+}
+
+[data-sue-panel][data-sue-mobile] .sue-color-input {
+  width: 32px;
+}
+
+/* 窄屏兜底：不依赖 JS 的标记，纯宽度断点也生效 */
+@media (max-width: 480px) {
+  [data-sue-panel] {
+    width: calc(100vw - 24px);
+  }
+
+  [data-sue-panel] .sue-swatch {
+    width: 32px;
+  }
+}
