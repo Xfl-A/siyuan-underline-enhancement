@@ -2,7 +2,7 @@
   "name": "siyuan-underline-enhancement",
   "version": "0.1.0",
   "description": "A SiYuan plugin that configures underline and overline line styles and colors from the editor floating toolbar",
-  "main": ".src/index.js",
+  "main": "./dist/index.js",
   "scripts": {
     "format": "dprint fmt",
     "format:check": "dprint check",

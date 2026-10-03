@@ -17,3 +17,19 @@ test("plugin.json and package.json agree on the package name", () => {
     assert.equal(readJSON("../plugin.json").name, expected);
     assert.equal(readJSON("../package.json").name, expected);
 });
+
+// minAppVersion 低于 3.8.6 会让插件调用当时并不存在的 addToolbarItem，因此钉死该下界。
+test("plugin.json pins minAppVersion to 3.8.6", () => {
+    assert.equal(readJSON("../plugin.json").minAppVersion, "3.8.6");
+});
+
+test("plugin.json runs on every frontend, backend and kernel", () => {
+    const manifest = readJSON("../plugin.json");
+    assert.deepEqual(manifest.frontends, ["all"]);
+    assert.deepEqual(manifest.backends, ["all"]);
+    assert.deepEqual(manifest.kernels, ["all"]);
+});
+
+test("plugin.json stays enabled in published workspaces", () => {
+    assert.equal(readJSON("../plugin.json").disabledInPublish, false);
+});
