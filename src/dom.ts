@@ -1,0 +1,388 @@
+/**
+ * 装饰 span 的 DOM 应用层：把选区换算成「可编辑区域 + 字符偏移」，负责剥掉旧装饰、按描述包裹新 span、
+ * 清理解包残留，并给出面板与编辑器交互要用的事件名。
+ *
+ * 全程只以 `editableElement.textContent` 的字符偏移为坐标系，不搬运活的 Range：
+ * 剥离装饰只改变嵌套关系、不改变 textContent，所以「先算偏移 → 再剥 → 再包」这条顺序下偏移始终有效。
+ * 这正是「只选中已有装饰的一部分再换样式」能正确工作的原因：包裹范围按文字位置重算，
+ * 既不会把未选中的文字拖进新 span，也不会把已选的尾巴丢掉。
+ */
+import {getFrontend} from "siyuan";
+import type {ISpanSpec} from "./model";
+
+/** 一个可编辑区域内的待包裹区间；start / end 是相对 editableElement.textContent 的字符偏移 */
+export interface IEditableGroup {
+    editableElement: HTMLElement;
+    blockElement: HTMLElement;
+    start: number;
+    end: number;
+}
+
+/** 装饰 span 的标记属性；值为下划线 u、上划线 o、两者合并 b */
+const MARK_ATTRIBUTE = "data-sue";
+
+/** 思源的零宽空格占位符 */
+const ZWSP = "\u200b";
+
+/** 块级可编辑区域的判定依据：思源每个块都带 data-node-id */
+const BLOCK_SELECTOR = "[data-node-id]";
+
+/** 单元格优先级最高：思源允许直接编辑表格单元格里的内容 */
+const CELL_SELECTOR = "td, th";
+
+/**
+ * 标题区：callout 与 tab-item 的标题是块的直接子元素，块内容里的同名 class 不参与判定。
+ * 标题的可编辑区域与正文不是一处，行高也不同，必须单独包裹才不会撑坏布局。
+ */
+const TITLE_SELECTOR = ":scope > .callout-info > .callout-title, :scope > .fn__flex-item > .fn__flex-item__label";
+
+/** 块内若还有别的可编辑区域（子块或兄弟标题区），这个块就只是个容器，不是可编辑区域 */
+const NESTED_REGION_SELECTOR = `${BLOCK_SELECTOR}, ${TITLE_SELECTOR}`;
+
+/**
+ * 不可编辑区域：这些区域内的文本不参与分组。
+ * 思源会重渲染代码高亮与公式，往里插 span 会被下一次渲染抹掉，公式里的 span 还会让公式变形。
+ */
+const NON_EDITABLE_SELECTOR = [
+    '[data-type="NodeCodeBlock"]',
+    '[data-type="NodeMathBlock"]',
+    '[data-type="NodeInlineMath"]',
+    ".math",
+    ".katex",
+    ".av",
+    ".hljs",
+].join(", ");
+
+/** 分组收集阶段的中途状态：先记下相交的文本节点，最后再统一换算成区域内的绝对偏移 */
+interface IEditableDraft {
+    editableElement: HTMLElement;
+    blockElement: HTMLElement;
+    pieces: Array<{node: Text; from: number; to: number;}>;
+}
+
+/** 元素内的全部文本节点，文档顺序 */
+const textNodesOf = (element: Element): Text[] => {
+    const nodes: Text[] = [];
+    const walker = element.ownerDocument.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+        nodes.push(node as Text);
+    }
+    return nodes;
+};
+
+/** 文本节点所在的元素；节点本身就是元素时返回自己 */
+const elementOf = (
+    node: Node,
+): Element => (node.nodeType === Node.ELEMENT_NODE ? (node as Element) : node.parentElement);
+
+/** 是否落在代码块、属性视图、公式或代码高亮里 */
+const isNonEditable = (node: Node): boolean => {
+    const element = elementOf(node);
+    return element !== null && element.closest(NON_EDITABLE_SELECTOR) !== null;
+};
+
+/**
+ * 判定文本节点所属的可编辑区域，优先级：表格单元格 → 标题区 → 所属块。
+ * 判定不出区域（编辑器容器这类结构节点）时返回 null，该文本不参与装饰。
+ */
+const resolveEditableElement = (node: Node): HTMLElement => {
+    const element = elementOf(node);
+    if (element === null) {
+        return null;
+    }
+    const cell = element.closest(CELL_SELECTOR);
+    if (cell !== null) {
+        return cell as HTMLElement;
+    }
+    const block = element.closest(BLOCK_SELECTOR);
+    if (block === null) {
+        return null;
+    }
+    // 块里可能有多个标题区（多标签页），要挑真正包住当前文本的那个
+    for (const title of Array.from(block.querySelectorAll(TITLE_SELECTOR))) {
+        if (title.contains(element)) {
+            return title as HTMLElement;
+        }
+    }
+    // 块与块之间的空白文本节点会落到容器上，包住它们毫无意义
+    if (block.querySelector(NESTED_REGION_SELECTOR) !== null) {
+        return null;
+    }
+    return block as HTMLElement;
+};
+
+/** 与选区相交、且可编辑的文本节点及它在选区内的区间；文档顺序 */
+const collectPieces = (range: Range): Array<{node: Text; from: number; to: number;}> => {
+    const common = range.commonAncestorContainer;
+    // 选区塌在单个文本节点里时，遍历起点要退到它的父元素，否则走不到那个节点自身
+    const root = common.nodeType === Node.TEXT_NODE ? common.parentNode : common;
+    const pieces: Array<{node: Text; from: number; to: number;}> = [];
+    if (root === null) {
+        return pieces;
+    }
+    const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    for (let found = walker.nextNode(); found !== null; found = walker.nextNode()) {
+        const node = found as Text;
+        if (isNonEditable(node) || !range.intersectsNode(node)) {
+            continue;
+        }
+        const from = node === range.startContainer ? range.startOffset : 0;
+        const to = node === range.endContainer ? range.endOffset : node.data.length;
+        // 与选区只是首尾相接、或自身就是空文本节点的都不算相交内容
+        if (to > from) {
+            pieces.push({node, from, to});
+        }
+    }
+    return pieces;
+};
+
+/** 每个文本节点在区域内 textContent 里的起始偏移 */
+const offsetIndexOf = (editableElement: HTMLElement): Map<Node, number> => {
+    const index = new Map<Node, number>();
+    let cursor = 0;
+    for (const text of textNodesOf(editableElement)) {
+        index.set(text, cursor);
+        cursor += text.data.length;
+    }
+    return index;
+};
+
+/**
+ * 收集选区覆盖到的可编辑区域。
+ *
+ * 分组是必需的：跨段落或跨单元格应用时，每个区域必须独立做 DOM 包裹，包裹一个区域不得影响另一个。
+ * 不可编辑区域内的文本不产生分组；分组按首个相交文本节点的出现顺序，也就是文档顺序。
+ */
+export const collectEditableGroups = (range: Range): IEditableGroup[] => {
+    const drafts: IEditableDraft[] = [];
+    const seen = new Map<HTMLElement, IEditableDraft>();
+    for (const piece of collectPieces(range)) {
+        const editableElement = resolveEditableElement(piece.node);
+        if (editableElement === null) {
+            continue;
+        }
+        let draft = seen.get(editableElement);
+        if (draft === undefined) {
+            const block = editableElement.closest(BLOCK_SELECTOR) ?? editableElement;
+            draft = {editableElement, blockElement: block as HTMLElement, pieces: []};
+            seen.set(editableElement, draft);
+            drafts.push(draft);
+        }
+        draft.pieces.push(piece);
+    }
+    const groups: IEditableGroup[] = [];
+    for (const draft of drafts) {
+        const index = offsetIndexOf(draft.editableElement);
+        let start = Number.POSITIVE_INFINITY;
+        let end = Number.NEGATIVE_INFINITY;
+        for (const piece of draft.pieces) {
+            const base = index.get(piece.node) ?? 0;
+            start = Math.min(start, base + piece.from);
+            end = Math.max(end, base + piece.to);
+        }
+        if (end > start) {
+            groups.push({editableElement: draft.editableElement, blockElement: draft.blockElement, start, end});
+        }
+    }
+    return groups;
+};
+
+/** 解包元素：把子节点搬到父节点上，再删掉空壳 */
+const unwrap = (node: Node): void => {
+    const parent = node.parentNode;
+    if (parent === null) {
+        return;
+    }
+    while (node.firstChild !== null) {
+        parent.insertBefore(node.firstChild, node);
+    }
+    parent.removeChild(node);
+};
+
+/**
+ * 剥掉区域内全部装饰 span，只改嵌套关系，不动一个字。
+ * 没有装饰时是空操作，因此「首次应用」与「改设置」可以走同一条路径，避免半新半旧的样式残留。
+ */
+export const stripDecorationIn = (editableElement: HTMLElement): void => {
+    const spans = editableElement.querySelectorAll(`[${MARK_ATTRIBUTE}]`);
+    // 从最内层开始拆：内层搬走的子节点正是外层要接着搬的
+    for (let i = spans.length - 1; i >= 0; i--) {
+        unwrap(spans[i]);
+    }
+};
+
+/**
+ * 字符偏移 → 文本节点内的位置。
+ * 偏移恰好落在两个文本节点的交界时归后一个节点的起点：这样端点与行内元素的边界重合，
+ * 包裹才能整体搬走行内元素，而不是把它拆成两份。
+ */
+const locate = (editableElement: HTMLElement, offset: number): {node: Text; offset: number;} => {
+    let remaining = Math.max(0, offset);
+    let last: Text = null;
+    for (const text of textNodesOf(editableElement)) {
+        if (remaining < text.data.length) {
+            return {node: text, offset: remaining};
+        }
+        remaining -= text.data.length;
+        last = text;
+    }
+    // 偏移越过末尾时兜到最后一个文本节点的末尾，绝不把范围算到区域之外
+    return last === null ? null : {node: last, offset: last.data.length};
+};
+
+/**
+ * 把恰好压在行内元素边界上的范围端点外扩到该元素的边界。
+ *
+ * 不扩的话，「选中 <strong> 里的文字」这种范围会被判成只部分覆盖 <strong>，
+ * 包裹时就会把整个 <strong> 复制进新 span、原地留一个空的 <strong>；外扩后它被整体搬走。
+ * 范围不会扩出可编辑区域。
+ */
+const expandBoundary = (
+    editableElement: HTMLElement,
+    node: Node,
+    offset: number,
+    isEnd: boolean,
+): {node: Node; offset: number;} => {
+    let current = node;
+    let position = offset;
+    for (;;) {
+        const parent = current.parentNode;
+        if (current === editableElement || parent === null || parent.nodeType !== Node.ELEMENT_NODE) {
+            break;
+        }
+        const isText = current.nodeType === Node.TEXT_NODE;
+        const edge = isEnd ? (isText ? (current as Text).length : current.childNodes.length) : 0;
+        if (position !== edge) {
+            break;
+        }
+        position = Array.from(parent.childNodes).indexOf(current as ChildNode) + (isEnd ? 1 : 0);
+        current = parent;
+    }
+    return {node: current, offset: position};
+};
+
+/** 按字符偏移解析范围的起点；区域内没有文本节点时返回 null */
+const resolveStart = (editableElement: HTMLElement, offset: number): {node: Node; offset: number;} => {
+    const at = locate(editableElement, offset);
+    return at === null ? null : expandBoundary(editableElement, at.node, at.offset, false);
+};
+
+/** 按字符偏移解析范围的终点；区域内没有文本节点时返回 null */
+const resolveEnd = (editableElement: HTMLElement, offset: number): {node: Node; offset: number;} => {
+    const at = locate(editableElement, offset);
+    return at === null ? null : expandBoundary(editableElement, at.node, at.offset, true);
+};
+
+/** 按字符偏移在区域内造 Range；区域内没有文本节点时返回 null */
+const createRangeIn = (editableElement: HTMLElement, start: number, end: number): Range => {
+    const from = resolveStart(editableElement, start);
+    const to = resolveEnd(editableElement, end);
+    if (from === null || to === null) {
+        return null;
+    }
+    const range = editableElement.ownerDocument.createRange();
+    range.setStart(from.node, from.offset);
+    range.setEnd(to.node, to.offset);
+    return range;
+};
+
+/** 用一个 spec 圈住 range，并把范围收敛到新 span 上，供上一层包裹套住它 */
+const wrapRange = (range: Range, spec: ISpanSpec): Range => {
+    const span = range.startContainer.ownerDocument.createElement("span");
+    span.setAttribute(MARK_ATTRIBUTE, spec.marker);
+    span.setAttribute("style", spec.css);
+    span.appendChild(range.extractContents());
+    range.insertNode(span);
+    range.selectNode(span);
+    return range;
+};
+
+/**
+ * 清理解包残留。
+ *
+ * normalize 合并被拆散的文本节点并删掉空文本节点；空文本节点会让思源按偏移算光标时偏位，
+ * 用户在装饰内继续打字就会跳到错误位置。
+ */
+const cleanupIn = (editableElement: HTMLElement): void => {
+    editableElement.normalize();
+    const placeholders: Text[] = [];
+    let hasVisibleText = false;
+    for (const text of textNodesOf(editableElement)) {
+        if (text.data === ZWSP) {
+            placeholders.push(text);
+        } else if (text.data !== "") {
+            hasVisibleText = true;
+        }
+    }
+    // 整块只剩占位符时留着它：抹掉之后思源就无法在该块内放置光标
+    if (!hasVisibleText) {
+        return;
+    }
+    for (const text of placeholders) {
+        const parent = text.parentNode;
+        if (parent !== null) {
+            parent.removeChild(text);
+        }
+    }
+};
+
+/**
+ * 在区域内按字符偏移包裹装饰 span。
+ *
+ * 顺序是「先剥后包」：剥 span 不改变 textContent，所以此时这些偏移仍指向同一批文字。
+ * specs 与 composePair 一致、外层在前，因此从末尾向前包裹，落到 DOM 上的是外层 span 包着内层 span。
+ * 空 specs 的语义是清除装饰；空区间或区域内没有文本节点时什么也不包。
+ */
+export const applySpansIn = (editableElement: HTMLElement, start: number, end: number, specs: ISpanSpec[]): void => {
+    stripDecorationIn(editableElement);
+    let range = end > start ? createRangeIn(editableElement, start, end) : null;
+    if (range !== null) {
+        for (let i = specs.length - 1; i >= 0; i--) {
+            range = wrapRange(range, specs[i]);
+        }
+    }
+    cleanupIn(editableElement);
+};
+
+/** 记下选区在各个可编辑区域里的字符偏移；DOM 改动后原 Range 会失效，靠它重建 */
+export const captureOffsets = (range: Range): Array<[HTMLElement, number, number]> => {
+    return collectEditableGroups(range).map((group) => {
+        const captured: [HTMLElement, number, number] = [group.editableElement, group.start, group.end];
+        return captured;
+    });
+};
+
+/**
+ * 按记下的偏移重建选区，并聚焦到最后一个可编辑区域，让用户可以接着输入。
+ *
+ * 偏移按文档顺序使用：第一项当起点、最后一项当终点；先聚焦再设选区，
+ * 因为聚焦会把光标放到元素里既有的位置，顺序反了选区就被冲掉。
+ */
+export const restoreOffsets = (captured: Array<[HTMLElement, number, number]>): void => {
+    if (!captured || captured.length === 0) {
+        return;
+    }
+    const first = captured[0];
+    const last = captured[captured.length - 1];
+    const from = resolveStart(first[0], first[1]);
+    const to = resolveEnd(last[0], last[2]);
+    const doc = first[0].ownerDocument;
+    const selection = doc.defaultView?.getSelection();
+    if (from === null || to === null || !selection) {
+        return;
+    }
+    const range = doc.createRange();
+    range.setStart(from.node, from.offset);
+    range.setEnd(to.node, to.offset);
+    last[0].focus();
+    selection.removeAllRanges();
+    selection.addRange(range);
+};
+
+/**
+ * 返回当前前端应使用的事件名：移动端用 touchend，其余用 click。
+ *
+ * 思源内部的 getEventName 没有导出到 petal 的公开类型，不能从 "siyuan" 包 import，
+ * 只能在这里按 getFrontend() 自己实现；面板与编辑器的所有事件绑定都得走这个函数。
+ */
+export const getEventName = (): string => (getFrontend() === "mobile" ? "touchend" : "click");
