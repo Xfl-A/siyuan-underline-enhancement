@@ -39,7 +39,9 @@ export const createFixture = (options = {}) => {
         return nodes;
     };
 
-    // 偏移换算在测试侧独立写一份：与 src 里的同名逻辑同源会让断言变成自证
+    // 偏移换算在测试侧独立写一份：与 src 里的同名逻辑同源会让断言变成自证。
+    // 但交界处的比较符必须与 src/dom.ts 的 locate 保持一致（同样归前一个节点的末尾），
+    // 否则夹具摆出来的端点和实现理解的端点会悄悄错开。
     const locate = (element, offset) => {
         // 选区端点可以直接落在某个文本节点上，此时不必再往下找
         if (element.nodeType === window.Node.TEXT_NODE) {

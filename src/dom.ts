@@ -31,6 +31,19 @@ const BLOCK_SELECTOR = "[data-node-id]";
 const CELL_SELECTOR = "td, th";
 
 /**
+ * 行内元素白名单：端点外扩只认这些标签。
+ *
+ * 集合之外的是块级容器。端点爬过块级元素就会让装饰 span 把整段块内容包进去，
+ * 而 span 的内容模型只允许行内内容，写进文档 HTML 就是非法标记，重新解析时照样留着。
+ * 这里不用 getComputedStyle(display) 判定：默认样式表里的 `display: inline` 是初值而非声明，
+ * 读出来是空串，拿它判断会把所有行内元素都当成块级。
+ */
+const PHRASING_TAGS = new Set((
+    "A ABBR B BDI BDO BR CITE CODE DATA DEL DFN EM FONT I IMG INS KBD LABEL MARK Q RP RT RUBY " +
+    "S SAMP SMALL SPAN STRONG SUB SUP TIME TT U VAR WBR"
+).split(" "));
+
+/**
  * 标题区：callout 与 tab-item 的标题是块的直接子元素，块内容里的同名 class 不参与判定。
  * 标题的可编辑区域与正文不是一处，行高也不同，必须单独包裹才不会撑坏布局。
  */
@@ -91,7 +104,9 @@ const resolveEditableElement = (node: Node): HTMLElement => {
         return null;
     }
     const cell = element.closest(CELL_SELECTOR);
-    if (cell !== null) {
+    // 单元格内多于一个块时 TD 只是容器，退回按块处理：把整格并成一个区域会让包裹范围跨过块边界，
+    // 块因此被复制一份、原处留一个空壳块，data-node-id 撞车后保存重载就出问题
+    if (cell !== null && cell.querySelectorAll(BLOCK_SELECTOR).length <= 1) {
         return cell as HTMLElement;
     }
     const block = element.closest(BLOCK_SELECTOR);
@@ -213,14 +228,14 @@ export const stripDecorationIn = (editableElement: HTMLElement): void => {
 
 /**
  * 字符偏移 → 文本节点内的位置。
- * 偏移恰好落在两个文本节点的交界时归后一个节点的起点：这样端点与行内元素的边界重合，
- * 包裹才能整体搬走行内元素，而不是把它拆成两份。
+ * 偏移恰好落在两个文本节点的交界时归前一个节点的末尾：端点因此压在行内元素的起点上，
+ * 该行内元素要么整个在范围内、要么整个在范围外，不会被复制成一个空壳留在原地。
  */
 const locate = (editableElement: HTMLElement, offset: number): {node: Text; offset: number;} => {
     let remaining = Math.max(0, offset);
     let last: Text = null;
     for (const text of textNodesOf(editableElement)) {
-        if (remaining < text.data.length) {
+        if (remaining <= text.data.length) {
             return {node: text, offset: remaining};
         }
         remaining -= text.data.length;
@@ -235,6 +250,7 @@ const locate = (editableElement: HTMLElement, offset: number): {node: Text; offs
  *
  * 不扩的话，「选中 <strong> 里的文字」这种范围会被判成只部分覆盖 <strong>，
  * 包裹时就会把整个 <strong> 复制进新 span、原地留一个空的 <strong>；外扩后它被整体搬走。
+ * 外扩只认行内元素：爬过块级元素会把块内容包进 span，那是 span 放不下的非法标记。
  * 范围不会扩出可编辑区域。
  */
 const expandBoundary = (
@@ -248,6 +264,9 @@ const expandBoundary = (
     for (;;) {
         const parent = current.parentNode;
         if (current === editableElement || parent === null || parent.nodeType !== Node.ELEMENT_NODE) {
+            break;
+        }
+        if (parent !== editableElement && !PHRASING_TAGS.has((parent as Element).tagName)) {
             break;
         }
         const isText = current.nodeType === Node.TEXT_NODE;

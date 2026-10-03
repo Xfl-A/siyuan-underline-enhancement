@@ -23,6 +23,51 @@ const ZWSP = "\u200b";
 const emptyTextNodes = (root) => textNodesOf(root).filter((node) => node.data === "");
 const placeholderNodes = (root) => textNodesOf(root).filter((node) => node.data === ZWSP);
 
+// 装饰 span 内出现块级元素就是非法标记：span 的内容模型只允许行内内容
+const BLOCK_TAGS = [
+    "BLOCKQUOTE",
+    "DIV",
+    "H1",
+    "H2",
+    "H3",
+    "H4",
+    "H5",
+    "H6",
+    "HR",
+    "LI",
+    "OL",
+    "P",
+    "PRE",
+    "SECTION",
+    "TABLE",
+    "TD",
+    "TH",
+    "UL",
+];
+
+/** 装饰 span 内部出现的块级标签名；为空才说明没把块搬进 span */
+const blockTagsInDecorations = (root) => {
+    const tags = new Set();
+    for (const span of Array.from(root.querySelectorAll("[data-sue]"))) {
+        for (const element of Array.from(span.querySelectorAll("*"))) {
+            if (BLOCK_TAGS.includes(element.tagName)) {
+                tags.add(element.tagName);
+            }
+        }
+    }
+    return Array.from(tags).sort();
+};
+
+/** 区域内全部块的 data-node-id；思源按 node-id 建文档树，重号会在保存重载时撞车 */
+const blockIDsIn = (root) =>
+    Array.from(root.querySelectorAll("[data-node-id]")).map((element) => element.getAttribute("data-node-id"));
+
+/** 被搬进装饰 span 的块的 data-node-id；块被复制过就会在这里出现重号 */
+const blockIDsInDecorations = (root) =>
+    Array.from(root.querySelectorAll("[data-sue] [data-node-id]")).map((element) =>
+        element.getAttribute("data-node-id")
+    );
+
 // ---------------------------------------------------------------- collectEditableGroups
 
 test("collectEditableGroups returns one group whose offsets cover exactly the selected text", () => {
@@ -96,12 +141,42 @@ test("collectEditableGroups resolves two table cells to their own TD elements", 
     cleanup();
 });
 
+test("collectEditableGroups splits a multi-block table cell into one group per block", () => {
+    const cleanup = mount(editor(
+        `<table class="b3-table" data-type="blockTable" data-node-id="table1"><tbody><tr>
+            <td data-type="blockTableCell">
+                <p data-type="text" data-node-id="c1">第一段</p>
+                <p data-type="text" data-node-id="c2">第二段</p>
+            </td>
+        </tr></tbody></table>`,
+    ));
+    const cell = document.querySelector("td");
+    const first = cell.querySelector('[data-node-id="c1"]');
+    const second = cell.querySelector('[data-node-id="c2"]');
+
+    const groups = collectEditableGroups(select(first, 0, second, 1));
+
+    // 单元格里有多于一个块时 TD 只是容器：按 TD 分组会把两个块并进一次包裹，
+    // 而跨块的端点会逼出「块被复制一份」的残骸，撞上重号的 data-node-id
+    assert.equal(groups.length, 2, "多块单元格必须退回按块分组");
+    assert.deepEqual(offsetsOf(groups), [[0, 3], [0, 1]]);
+    assert.deepEqual(
+        toHost(groups.map((group) => group.editableElement.getAttribute("data-node-id"))),
+        ["c1", "c2"],
+    );
+    cleanup();
+});
+
 test("collectEditableGroups contributes nothing from a code block inside the selection", () => {
+    // 思源渲染代码块时同时保留一份原始源码与一份高亮副本，两份都不可编辑
+    const plainCode = '<pre style="display: none;"><code class="language-js">let x = 1;</code></pre>';
+    const highlighted =
+        '<pre class="hljs"><code class="hljs"><span class="hljs-keyword">let</span> x = 1;</code></pre>';
     const cleanup = mount(editor(
         `<p data-type="text" data-node-id="p1">abc</p>
         <div class="fn__code-block" data-type="NodeCodeBlock" data-node-id="code1">
-            <pre style="display: none;"><code class="language-js">let x = 1;</code></pre>
-            <pre class="hljs" style="display: block;"><code class="language-js hljs"><span class="hljs-keyword">let</span> x = 1;</code></pre>
+            ${plainCode}
+            ${highlighted}
         </div>`,
     ));
     const paragraph = document.querySelector("p");
@@ -382,6 +457,80 @@ test("applySpansIn keeps the nesting of sibling inline elements", () => {
     assert.equal(em.parentElement, paragraph);
     assert.equal(em.textContent, "emph");
     assert.deepEqual(emptyTextNodes(paragraph).length, 0);
+    cleanup();
+});
+
+test("applySpansIn wraps a single-block table cell without pulling the block into the span", () => {
+    const cleanup = mount(editor(
+        `<table class="b3-table" data-type="blockTable" data-node-id="table1"><tbody><tr>
+            <td data-type="blockTableCell"><p data-type="text" data-node-id="c1">abc</p></td>
+        </tr></tbody></table>`,
+    ));
+    const cell = document.querySelector("td");
+    // 单块单元格仍按计划判定为 TD 本身
+    const groups = collectEditableGroups(selectWithin(cell, 0, 3));
+    assert.equal(groups[0].editableElement, cell);
+    for (const group of groups) {
+        applySpansIn(group.editableElement, group.start, group.end, [underlineSpec()]);
+    }
+
+    assert.deepEqual(
+        blockTagsInDecorations(cell),
+        [],
+        "span 只放得下行内内容；块级元素被端点外扩拉进 span 就是非法标记，重新解析时照样留在文档里",
+    );
+    assert.deepEqual(blockIDsIn(cell), ["c1"]);
+    assert.equal(cell.textContent, "abc");
+    cleanup();
+});
+
+test("applySpansIn does not duplicate a block id when it wraps one paragraph of a multi-block cell", () => {
+    const cleanup = mount(editor(
+        `<table class="b3-table" data-type="blockTable" data-node-id="table1"><tbody><tr>
+            <td data-type="blockTableCell">
+                <p data-type="text" data-node-id="c1">第一段</p>
+                <p data-type="text" data-node-id="c2">第二段</p>
+            </td>
+        </tr></tbody></table>`,
+    ));
+    const cell = document.querySelector("td");
+    const first = cell.querySelector('[data-node-id="c1"]');
+    const before = cell.textContent;
+
+    // 只选第一段；思源按块应用行内标记，单元格此时只是容器
+    const groups = collectEditableGroups(selectWithin(first, 0, 3));
+    for (const group of groups) {
+        applySpansIn(group.editableElement, group.start, group.end, [underlineSpec()]);
+    }
+
+    // 单元格内的块 id 重号会让保存重载时撞车，空壳块则是块被复制后剩下的残骸
+    assert.deepEqual(blockIDsInDecorations(cell), [], "没有任何块被搬进装饰 span");
+    assert.deepEqual(blockIDsIn(cell), ["c1", "c2"], "块 id 必须唯一，且没有多出来的空壳块");
+    assert.deepEqual(decorationsIn(cell), [{marker: "u", style: UNDERLINE_CSS, text: "第一段"}]);
+    assert.equal(cell.textContent, before);
+    cleanup();
+});
+
+test("applySpansIn leaves no empty inline clone when the range ends where an inline element starts", () => {
+    const linkURL = "https://example.com/doc";
+    const cleanup = mount(
+        editor(`<p data-type="text" data-node-id="p1">abc<em>de</em></p>
+        <p data-type="text" data-node-id="p2">abc<a href="${linkURL}">de</a></p>`),
+    );
+    const [emphasized, linked] = document.querySelectorAll("p");
+
+    // 0..3 正好停在行内元素的起点：端点若算到行内元素内部，元素会被复制成空壳留在原地
+    applySpansIn(emphasized, 0, 3, [underlineSpec()]);
+    applySpansIn(linked, 0, 3, [underlineSpec()]);
+
+    assert.equal(emphasized.querySelectorAll("em").length, 1, "不能多出一个空的 <em> 副本");
+    assert.equal(linked.querySelectorAll("a").length, 1, "不能多出一个空的 <a> 副本");
+    assert.equal(linked.querySelector("a").getAttribute("href"), linkURL);
+    assert.deepEqual(decorationsIn(emphasized), [{marker: "u", style: UNDERLINE_CSS, text: "abc"}]);
+    assert.deepEqual(decorationsIn(linked), [{marker: "u", style: UNDERLINE_CSS, text: "abc"}]);
+    assert.equal(emphasized.parentElement.querySelector("p").textContent, "abcde");
+    assert.deepEqual(emptyTextNodes(emphasized).length, 0);
+    assert.deepEqual(emptyTextNodes(linked).length, 0);
     cleanup();
 });
 
