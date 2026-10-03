@@ -49,8 +49,10 @@ const changeStack: IChangeEntry[] = [];
  *
  * 撤销栈只存 HTML 字符串，不持有 DOM 引用：块随时可能被思源重渲染，攥着旧节点只会拿到已经脱管的对象。
  * 这里逐个比对属性值而不是拼属性选择器：块 id 里一旦出现引号或反斜杠，选择器字面量会直接抛错或查不到。
+ *
+ * 撤销会把整块 HTML 换回去，调用方手里的块元素同样会脱管，因此这个查找对插件另一侧也要公开。
  */
-const findBlockElement = (blockId: string): HTMLElement | null => {
+export const findBlockElement = (blockId: string): HTMLElement | null => {
     const blocks = document.querySelectorAll(`[${NODE_ID_ATTRIBUTE}]`);
     for (let i = 0; i < blocks.length; i++) {
         const element = blocks[i];
