@@ -1,7 +1,7 @@
 // 面板测试：在 jsdom 里摆一个浮动工具栏锚点，用真实点击驱动面板，断言它报上来的配置。
 //
 // 面板的依赖全部换成可控桩：src/dom.ts 只桩掉 getFrontend（事件名的真实实现因此仍走 dom.ts 的代码），
-// src/model.ts 原样载入，于是 isSamePair 与 sanitizeColor 都是被测链路上的真函数。
+// src/model.ts 原样载入，于是 isSameDecoration 与 sanitizeColor 都是被测链路上的真函数。
 import {JSDOM} from "jsdom";
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
@@ -22,22 +22,19 @@ const COLOR_PATTERN = new RegExp(`^${WHITELIST}$`);
 // 以及 jsdom 会把十六进制规范化成的 rgb()
 const BACKGROUND_PATTERN = new RegExp(`^(${WHITELIST}|transparent|rgb\\(\\d{1,3}, \\d{1,3}, \\d{1,3}\\))$`);
 
-const SOLID_PAIR = {
-    underline: {enabled: true, style: "solid", color: "#e5484d"},
-    overline: {enabled: true, style: "wavy", color: ""},
-};
+/** 夹具默认的初值：一个开着、实线、带具体颜色的下划线 */
+const SOLID_DECORATION = {enabled: true, style: "solid", color: "#e5484d"};
 
-/** 默认形态：下划线开着、上划线关着（规格 §4 的默认值） */
-const DEFAULT_PAIR = {
-    underline: {enabled: true, style: "solid", color: ""},
-    overline: {enabled: false, style: "solid", color: ""},
-};
+/** 默认形态：下划线开着、实线、跟随文字颜色（与 model 的 DEFAULT_DECORATION 同一份语义） */
+const DEFAULT_DECORATION = {enabled: true, style: "solid", color: ""};
+
+/** 既不在预设里、也不是主题变量的颜色，因此要补一块临时的自定义色色块 */
+const CUSTOM_DECORATION = {enabled: true, style: "solid", color: "#123456"};
 
 /** 合成的 i18n：每个键一个不会与任何真实文案相撞的记号，便于断言「有没有硬编码字面量」 */
 const SENTINELS = {
     underlineEnhancement: "⟦title⟧",
     underline: "⟦underline⟧",
-    overline: "⟦overline⟧",
     lineStyle: "⟦lineStyle⟧",
     color: "⟦color⟧",
     followTextColor: "⟦follow⟧",
@@ -88,17 +85,6 @@ const stubRects = (window, initial) => {
     return (rects) => Object.assign(current, rects);
 };
 
-/** 一组色块里被选中的那些；querySelectorAll 给的是 NodeList，先摊成数组 */
-const selectedSwatches = (swatches) =>
-    Array.from(swatches).filter((swatch) => swatch.getAttribute("aria-pressed") === "true");
-
-/**
- * 整个色块行里被选中的数量：预设、跟随文字色与临时色块合起来算。
- * 「整行只允许一个选中项」是用户能直接看懂的约束，就拿它当断言。
- */
-const selectedCountIn = (section) =>
-    selectedSwatches(section.querySelectorAll("[data-sue-color], [data-sue-follow-color]")).length;
-
 /**
  * 摆一个选区：jsdom 里的 getSelection() 恒为空，Range.getBoundingClientRect 也不存在。
  * 这里直接在 window 上装一个可改的 getSelection，矩形由调用方给出，
@@ -119,7 +105,7 @@ const stubSelection = (window, initial) => {
 
 const createFixture = (options = {}) => {
     const frontend = options.frontend ?? "desktop";
-    const initialPair = options.initialPair ?? SOLID_PAIR;
+    const initialDecoration = options.initialDecoration ?? SOLID_DECORATION;
     const dom = new JSDOM(
         '<!DOCTYPE html><html><body><div class="fn__toolbar" id="anchor"></div></body></html>',
         {pretendToBeVisual: true},
@@ -152,25 +138,27 @@ const createFixture = (options = {}) => {
         globals: {document},
     });
 
-    // vm realm 里造出来的 pair 搬回宿主 realm 才能做严格比较
+    // vm realm 里造出来的 decoration 搬回宿主 realm 才能做严格比较
     const calls = [];
     const controller = panelModule.createPanel({
         anchor,
-        initialPair,
+        initialDecoration,
         i18n: options.i18n ?? i18n,
-        undoEnabled: options.undoEnabled ?? false,
         mixed: options.mixed === true,
         // 不给就传 undefined：面板必须自己判断这个值能不能用，而不是当成字符串收下
         followTextColor: options.followTextColor,
-        onChange: (pair) => calls.push({type: "change", pair: toHost(pair)}),
+        onChange: (decoration) => calls.push({type: "change", decoration: toHost(decoration)}),
         onClear: () => calls.push({type: "clear"}),
         onUndo: () => calls.push({type: "undo"}),
         onClose: () => calls.push({type: "close"}),
+        onCustomColorPicked: () => calls.push({type: "picked"}),
     });
     const panel = document.querySelector("[data-sue-panel]");
 
     const section = (direction) => panel.querySelector(`[data-sue-section="${direction}"]`);
     const switchOf = (direction) => section(direction).querySelector("[data-sue-switch]");
+    /** 开关的勾选态读在 aria-checked 上：它不是 input，没有 checked 属性 */
+    const checkedOf = (direction) => switchOf(direction).getAttribute("aria-checked") === "true";
     const styleSwatchesOf = (direction) => Array.from(section(direction).querySelectorAll("[data-sue-style]"));
     const styleSwatchOf = (direction, style) => section(direction).querySelector(`[data-sue-style="${style}"]`);
     // 预设色块：自定义色的临时色块另带标记，不算预设，因此预设恒为 11 块
@@ -186,7 +174,7 @@ const createFixture = (options = {}) => {
     const mixedHint = () => panel.querySelector("[data-sue-mixed]");
 
     const ofType = (type) => calls.filter((call) => call.type === type);
-    const changes = () => ofType("change").map((call) => call.pair);
+    const changes = () => ofType("change").map((call) => call.decoration);
     const lastChange = () => changes()[changes().length - 1];
     const countOf = (type) => ofType(type).length;
 
@@ -201,8 +189,8 @@ const createFixture = (options = {}) => {
 
     /**
      * 完整的指针序列：先按下再点击。
-     * mousedown 必须带 cancelable，否则 preventDefault 不会置位 defaultPrevented，断言就成了自证；
-     * click 必须是真的 MouseEvent，浏览器才会在它上面跑复选框的激活行为（jsdom 与浏览器同此约定）。
+     * click 必须是真的 MouseEvent，浏览器才会在它上面跑控件的激活行为；
+     * mousedown 带 cancelable，测试据此断言插件不再去拦任何默认行为。
      */
     const press = (element) => {
         const down = fire(element, "mousedown", {cancelable: true});
@@ -222,6 +210,7 @@ const createFixture = (options = {}) => {
         calls,
         section,
         switchOf,
+        checkedOf,
         styleSwatchesOf,
         styleSwatchOf,
         colorSwatchesOf,
@@ -245,6 +234,35 @@ const createFixture = (options = {}) => {
     };
 };
 
+/**
+ * 点一个控件并给出这一夹具的全部回调记录。
+ *
+ * 面板在任何一次激活之后都会收起自己，因此多步交互必须一步一个夹具：
+ * 每一步都用上一步的结果当初值，链条才能连起来。
+ */
+const activate = (element, options = {}) => {
+    const fixture = createFixture(options);
+    if (options.pickColor !== undefined) {
+        const input = fixture.customInputOf("underline");
+        input.value = options.pickColor;
+        input.dispatchEvent(new fixture.window.Event("change", {bubbles: true}));
+    } else {
+        element(fixture).click();
+    }
+    return fixture;
+};
+
+/** 一组色块里被选中的那些；querySelectorAll 给的是 NodeList，先摊成数组 */
+const selectedSwatches = (swatches) =>
+    Array.from(swatches).filter((swatch) => swatch.getAttribute("aria-pressed") === "true");
+
+/**
+ * 整个色块行里被选中的数量：预设、跟随文字色与临时色块合起来算。
+ * 「整行只允许一个选中项」是用户能直接看懂的约束，就拿它当断言。
+ */
+const selectedCountIn = (section) =>
+    selectedSwatches(section.querySelectorAll("[data-sue-color], [data-sue-follow-color]")).length;
+
 // ------------------------------------------------------------------ 结构
 
 test("面板挂到 body 上并带 data-sue-panel 标记", () => {
@@ -254,56 +272,52 @@ test("面板挂到 body 上并带 data-sue-panel 标记", () => {
     close();
 });
 
-test("面板含两个方向区块，各带开关、5 个线型色块、跟随文字色色块、11 个预设色块与取色器", () => {
+test("面板只有一个方向区块，带开关、5 个线型色块、跟随文字色色块、11 个预设色块与取色器", () => {
     const {panel, model, switchOf, styleSwatchesOf, colorSwatchesOf, followSwatchOf, customInputOf, close} =
         createFixture();
+    // 上划线方向已经整个去掉：面板里只剩下划线这一个方向
     assert.deepEqual(
         Array.from(panel.querySelectorAll("[data-sue-section]")).map((element) =>
             element.getAttribute("data-sue-section")
         ),
-        ["underline", "overline"],
+        ["underline"],
     );
-    for (const direction of ["underline", "overline"]) {
-        const toggle = switchOf(direction);
-        assert.equal(toggle.tagName, "INPUT");
-        assert.equal(toggle.type, "checkbox");
-        assert.ok(toggle.classList.contains("b3-switch"), "开关复用思源既有的 b3-switch");
-        assert.deepEqual(
-            styleSwatchesOf(direction).map((swatch) => swatch.getAttribute("data-sue-style")),
-            toHost(model.LINE_STYLES),
-            "线型色块的展示顺序必须与 LINE_STYLES 一致",
-        );
-        assert.equal(styleSwatchesOf(direction).length, 5);
-        assert.equal(colorSwatchesOf(direction).length, 11);
-        assert.deepEqual(
-            colorSwatchesOf(direction).map((swatch) => swatch.getAttribute("data-sue-color")),
-            toHost(model.PRESET_COLORS),
-        );
-        const follow = followSwatchOf(direction);
-        assert.ok(follow, "每个方向都要有「跟随文字色」色块");
-        assert.equal(follow.textContent, "A", "跟随文字色用字母 A 表示");
-        assert.equal(follow.style.backgroundColor, "transparent", "跟随文字色色块背景透明");
-        assert.equal(follow.style.color, "", "跟随文字色色块的文字色继承面板正文色");
-        assert.equal(customInputOf(direction).type, "color", "每个方向都要有自定义取色器");
-    }
+    const toggle = switchOf("underline");
+    assert.equal(toggle.tagName, "DIV");
+    assert.equal(toggle.getAttribute("role"), "switch");
+    assert.deepEqual(
+        styleSwatchesOf("underline").map((swatch) => swatch.getAttribute("data-sue-style")),
+        toHost(model.LINE_STYLES),
+        "线型色块的展示顺序必须与 LINE_STYLES 一致",
+    );
+    assert.equal(styleSwatchesOf("underline").length, 5);
+    assert.equal(colorSwatchesOf("underline").length, 11);
+    assert.deepEqual(
+        colorSwatchesOf("underline").map((swatch) => swatch.getAttribute("data-sue-color")),
+        toHost(model.PRESET_COLORS),
+    );
+    const follow = followSwatchOf("underline");
+    assert.ok(follow, "要有「跟随文字色」色块");
+    assert.equal(follow.textContent, "A", "跟随文字色用字母 A 表示");
+    assert.equal(follow.style.backgroundColor, "transparent", "跟随文字色色块背景透明");
+    assert.equal(follow.style.color, "", "跟随文字色色块的文字色继承面板正文色");
+    assert.equal(customInputOf("underline").type, "color", "要有自定义取色器");
     close();
 });
 
-test("每个方向的颜色行都给出纯黑色块", () => {
+test("颜色行给出纯黑色块", () => {
     // 纯黑是「跟随文字颜色」的显式反面，也是最常用的一个具体色：没有它就只能拿取色器去凑
     const {section, colorSwatchesOf, close} = createFixture();
-    for (const direction of ["underline", "overline"]) {
-        const black = section(direction).querySelector('[data-sue-color="#000000"]');
-        assert.ok(black, `${direction} 区块缺纯黑色块`);
-        assert.ok(
-            colorSwatchesOf(direction).includes(black),
-            "纯黑必须是预设色块，不能被当成自定义色的临时色块",
-        );
-        assert.equal(black.getAttribute("aria-pressed"), "false");
-        assert.equal(black.title, "#000000", "悬停提示给出颜色原值");
-        // 纯黑同样要过白名单：它会跟着装饰进文档 HTML
-        assert.match(black.getAttribute("data-sue-color"), COLOR_PATTERN);
-    }
+    const black = section("underline").querySelector('[data-sue-color="#000000"]');
+    assert.ok(black, "颜色行缺纯黑色块");
+    assert.ok(
+        colorSwatchesOf("underline").includes(black),
+        "纯黑必须是预设色块，不能被当成自定义色的临时色块",
+    );
+    assert.equal(black.getAttribute("aria-pressed"), "false");
+    assert.equal(black.title, "#000000", "悬停提示给出颜色原值");
+    // 纯黑同样要过白名单：它会跟着装饰进文档 HTML
+    assert.match(black.getAttribute("data-sue-color"), COLOR_PATTERN);
     close();
 });
 
@@ -311,11 +325,10 @@ test("「跟随文字色」色块用选中文字的计算色给 A 上色", () =>
     // 这个选项的全部意义就是预览装饰将要取到的颜色；A 显不出那个颜色，色块等于没有预览
     const computed = "rgb(18, 52, 86)";
     const {panel, followSwatchOf, close} = createFixture({followTextColor: computed});
-    for (const direction of ["underline", "overline"]) {
-        const follow = followSwatchOf(direction);
-        assert.equal(follow.style.color, computed, `${direction} 区块的字母 A 用了真实文字色`);
-        assert.match(follow.getAttribute("style"), /(^|;)\s*color:\s*rgb\(18, 52, 86\);?$/);
-    }
+    const follow = followSwatchOf("underline");
+    assert.equal(follow.style.color, computed, "字母 A 用了真实文字色");
+    assert.match(follow.getAttribute("style"), /(^|;)\s*color:\s*rgb\(18, 52, 86\);?$/);
+    assert.equal(follow.getAttribute("aria-label"), i18n.followTextColor, "色块的无障碍名取自 i18n");
     // 这个值只落在色块自己的 color 上：混进 text-decoration 就会跟着装饰一起进文档 HTML，
     // 而白名单只认十六进制与主题变量，保存前会被整条丢掉，界面与落盘结果就此对不上
     assert.ok(!panel.outerHTML.includes(`text-decoration-color: ${computed}`), "计算色不得混进装饰的声明");
@@ -325,9 +338,7 @@ test("「跟随文字色」色块用选中文字的计算色给 A 上色", () =>
 
 test("没给出文字色或值非法时都不写 color，字母保持继承", () => {
     const {followSwatchOf, close} = createFixture();
-    for (const direction of ["underline", "overline"]) {
-        assert.equal(followSwatchOf(direction).style.color, "", "没给出文字色时一个属性都不写");
-    }
+    assert.equal(followSwatchOf("underline").style.color, "", "没给出文字色时一个属性都不写");
     close();
 
     // 计算色来自 getComputedStyle，本身不该是脏的；但面板是把它写进 DOM 的第一个地方，脏值必须在这里被挡掉
@@ -342,9 +353,7 @@ test("没给出文字色或值非法时都不写 color，字母保持继承", ()
         ]
     ) {
         const {panel, followSwatchOf: followOf, close: closePanel} = createFixture({followTextColor: value});
-        for (const direction of ["underline", "overline"]) {
-            assert.equal(followOf(direction).style.color, "", `脏值不得写进 style：${value}`);
-        }
+        assert.equal(followOf("underline").style.color, "", `脏值不得写进 style：${value}`);
         assert.ok(!panel.outerHTML.includes("url("), `脏值不得留在面板标记里：${value}`);
         assert.ok(!panel.outerHTML.includes("position: fixed"), `脏值不得留在面板标记里：${value}`);
         closePanel();
@@ -353,137 +362,135 @@ test("没给出文字色或值非法时都不写 color，字母保持继承", ()
 
 test("线型色块靠元素自身的 text-decoration 画出真实的线", () => {
     const {styleSwatchesOf, close} = createFixture();
-    // 每个区块画自己的方向：上划线区块画上划线，否则那一行看起来只是上面那行的复制品
-    for (const [direction, line] of [["underline", "underline"], ["overline", "overline"]]) {
-        for (const swatch of styleSwatchesOf(direction)) {
-            assert.equal(swatch.style.textDecorationLine, line, `${direction} 区块的线型色块`);
-            assert.equal(swatch.style.textDecorationStyle, swatch.getAttribute("data-sue-style"));
-            assert.equal(swatch.style.textDecorationColor, "currentColor");
-            assert.notEqual(swatch.textContent, "", "色块里必须有可供装饰线绘制的文本");
-            assert.equal(swatch.children.length, 0, "预览不靠子元素画，也不放图标字符");
-            assert.equal(swatch.getElementsByTagName("img").length, 0, "预览不用图片");
-            assert.equal(swatch.title, "", "CSS 关键词当提示文案在中文界面里读不懂，预览本身就是提示");
-        }
+    for (const swatch of styleSwatchesOf("underline")) {
+        // 面板只画下划线，因此预览线恒在下侧；其余两个属性仍逐个写全
+        assert.equal(swatch.style.textDecorationLine, "underline", "线型色块画的是下划线");
+        assert.equal(swatch.style.textDecorationStyle, swatch.getAttribute("data-sue-style"));
+        assert.equal(swatch.style.textDecorationColor, "currentColor");
+        assert.notEqual(swatch.textContent, "", "色块里必须有可供装饰线绘制的文本");
+        assert.equal(swatch.children.length, 0, "预览不靠子元素画，也不放图标字符");
+        assert.equal(swatch.getElementsByTagName("img").length, 0, "预览不用图片");
+        assert.equal(swatch.title, "", "CSS 关键词当提示文案在中文界面里读不懂，预览本身就是提示");
     }
     close();
 });
 
 test("线型色块禁止空白折叠，预览线才画得满色块", () => {
     const {styleSwatchesOf, close} = createFixture();
-    for (const direction of ["underline", "overline"]) {
-        for (const swatch of styleSwatchesOf(direction)) {
-            // 示例文本用的是 EN SPACE（U+2002，Unicode Zs），属于 CSS 定义的「可折叠空白」；
-            // white-space 保持 normal 的话两个会被折成一个 0.5em，线只剩七八个像素宽，
-            // dotted 变成一个点、dashed 变成一截，五个线型就分不出来了
-            assert.equal(swatch.style.whiteSpace, "pre", `${direction} 区块的线型色块必须禁止折叠`);
-            assert.ok(swatch.textContent.length >= 2, "示例文本要够长，线才有可辨认的长度");
-        }
+    for (const swatch of styleSwatchesOf("underline")) {
+        // 示例文本用的是 EN SPACE（U+2002，Unicode Zs），属于 CSS 定义的「可折叠空白」；
+        // white-space 保持 normal 的话两个会被折成一个 0.5em，线只剩七八个像素宽，
+        // dotted 变成一个点、dashed 变成一截，五个线型就分不出来了
+        assert.equal(swatch.style.whiteSpace, "pre", "线型色块必须禁止折叠");
+        assert.ok(swatch.textContent.length >= 2, "示例文本要够长，线才有可辨认的长度");
     }
     close();
 });
 
 // ------------------------------------------------------------------ 回填
 
-test("默认形态下上划线方向关闭，它的线型行与颜色行整体禁用", () => {
-    // 默认 pair 就是规格 §4 的那一份：下划线开、上划线关
-    const {switchOf, styleSwatchesOf, colorSwatchesOf, followSwatchOf, customInputOf, close} = createFixture({
-        initialPair: DEFAULT_PAIR,
-    });
-    assert.equal(switchOf("underline").checked, true);
-    assert.equal(switchOf("overline").checked, false);
+test("开关无论开合，样式与颜色两行的控件都不带 disabled 或 aria-disabled", () => {
+    // 面板里不允许出现任何「按了没反应」的控件：没有 disabled，也没有换皮的 aria-disabled。
+    // 方向关着时这两行仍然可点，点下去就是把下划线打开并用上这个值
     for (
-        const swatch of [...styleSwatchesOf("underline"), ...colorSwatchesOf("underline"), followSwatchOf("underline")]
+        const initialDecoration of [
+            DEFAULT_DECORATION,
+            SOLID_DECORATION,
+            {...SOLID_DECORATION, enabled: false},
+            {...CUSTOM_DECORATION, enabled: false},
+        ]
     ) {
-        assert.equal(swatch.disabled, false, "开着的方向不该禁用");
+        const {panel, close} = createFixture({initialDecoration});
+        assert.deepEqual(
+            Array.from(panel.querySelectorAll("[disabled], [aria-disabled]")).map((element) => element.outerHTML),
+            [],
+            `出现了被禁用的控件：${JSON.stringify(initialDecoration)}`,
+        );
+        close();
     }
-    assert.equal(customInputOf("underline").disabled, false);
-    for (const swatch of [...styleSwatchesOf("overline"), ...colorSwatchesOf("overline"), followSwatchOf("overline")]) {
-        assert.equal(swatch.disabled, true, "关着的方向，线型与颜色两行都必须禁用");
-    }
-    assert.equal(customInputOf("overline").disabled, true, "取色器同样禁用");
-    close();
 });
 
-test("方向关闭时点击该方向的色块与取色器都不产生改动", () => {
-    // 复现审阅里的误操作：面板默认开着下划线、关着上划线，点上划线那行的蓝色色块
-    // 结果给整段文字加上了实线下划线 —— 用户根本没要求过
-    const {styleSwatchOf, colorSwatchesOf, customInputOf, followSwatchOf, window, changes, close} = createFixture({
-        initialPair: DEFAULT_PAIR,
+test("方向关闭时点线型色块会重新打开下划线", () => {
+    // 「所有控件都活着」这条要求的直接后果：方向关着的时候，线型与颜色两行不再是死控件
+    const {lastChange, countOf, close} = activate((f) => f.styleSwatchesOf("underline")[2], {
+        initialDecoration: {...DEFAULT_DECORATION, enabled: false},
     });
-
-    styleSwatchOf("overline", "wavy").click();
-    colorSwatchesOf("overline")[5].click();
-    followSwatchOf("overline").click();
-    const input = customInputOf("overline");
-    input.value = "#123456";
-    input.dispatchEvent(new window.Event("change", {bubbles: true}));
-
-    assert.equal(changes().length, 0, "关着的方向不得因为点色块而改设置");
+    assert.equal(countOf("change"), 1, "点线型色块必须真的产生一次改动");
+    assert.deepEqual(lastChange(), {enabled: true, style: "dotted", color: ""});
     close();
 });
 
-test("方向开关关掉后该方向两行立刻禁用，再打开又恢复可用", () => {
-    const {switchOf, styleSwatchOf, colorSwatchesOf, lastChange, changes, close} = createFixture();
-    assert.equal(styleSwatchOf("overline", "wavy").disabled, false);
+test("方向关闭时点颜色色块与取色器同样会重新打开下划线", () => {
+    const preset = activate((f) => f.colorSwatchesOf("underline")[5], {
+        initialDecoration: {...DEFAULT_DECORATION, enabled: false},
+    });
+    assert.deepEqual(preset.lastChange(), {enabled: true, style: "solid", color: "#0090ff"});
+    preset.close();
 
-    switchOf("overline").click();
-    assert.equal(styleSwatchOf("overline", "wavy").disabled, true, "关掉之后两行要马上禁用");
-    assert.equal(colorSwatchesOf("overline")[0].disabled, true);
-    assert.equal(changes().length, 1);
-
-    switchOf("overline").click();
-    assert.equal(styleSwatchOf("overline", "wavy").disabled, false, "打开之后要恢复可用");
-    assert.equal(colorSwatchesOf("overline")[0].disabled, false);
-
-    styleSwatchOf("overline", "wavy").click();
-    assert.equal(lastChange().overline.style, "wavy");
-    close();
+    const picked = activate(() => {}, {
+        initialDecoration: {...DEFAULT_DECORATION, enabled: false},
+        pickColor: "#123456",
+    });
+    assert.deepEqual(picked.lastChange(), {enabled: true, style: "solid", color: "#123456"});
+    picked.close();
 });
 
-test("线型色块带可读的无障碍名，取色器上的自定义色块同样如此", () => {
+test("关掉开关只改 enabled，线型与颜色保持不变，再打开沿用", () => {
+    const off = activate((f) => f.switchOf("underline"), {initialDecoration: CUSTOM_DECORATION});
+    assert.deepEqual(off.lastChange(), {...CUSTOM_DECORATION, enabled: false}, "关掉不牵动线型与颜色");
+    assert.equal(off.controller.getDecoration().style, "solid");
+    assert.equal(off.controller.getDecoration().color, "#123456");
+    off.close();
+
+    // 再打开：沿用关掉之前的那份线型与颜色
+    const on = activate((f) => f.switchOf("underline"), {
+        initialDecoration: {...CUSTOM_DECORATION, enabled: false},
+    });
+    assert.deepEqual(on.lastChange(), CUSTOM_DECORATION);
+    on.close();
+});
+
+test("线型色块带可读的无障碍名", () => {
     const {styleSwatchOf, close} = createFixture();
-    // 按钮的唯一内容是两个 EN SPACE，没有名字就只能靠图标形状辨认
-    assert.equal(styleSwatchOf("underline", "solid").getAttribute("aria-label"), "实线 · 下划线");
-    assert.equal(styleSwatchOf("underline", "wavy").getAttribute("aria-label"), "波浪线 · 下划线");
-    assert.equal(styleSwatchOf("overline", "dotted").getAttribute("aria-label"), "点线 · 上划线");
+    // 色块里唯一的可见内容是两个 EN SPACE，没有名字就只能靠线的形状辨认
+    assert.equal(styleSwatchOf("underline", "solid").getAttribute("aria-label"), "实线");
+    assert.equal(styleSwatchOf("underline", "wavy").getAttribute("aria-label"), "波浪线");
+    assert.equal(styleSwatchOf("underline", "dotted").getAttribute("aria-label"), "点线");
     // 不能是 CSS 关键词：中文界面里 "wavy" 对用户没有意义
-    for (const direction of ["underline", "overline"]) {
-        for (const style of ["solid", "dashed", "dotted", "double", "wavy"]) {
-            const swatch = styleSwatchOf(direction, style);
-            const label = swatch.getAttribute("aria-label");
-            assert.equal(label, `${i18n[`style${style[0].toUpperCase()}${style.slice(1)}`]} · ${i18n[direction]}`);
-            assert.notEqual(label, style, "无障碍名不能直接用 CSS 关键词");
-            assert.equal(swatch.getAttribute("aria-label"), label, "两个方向各有各的线型色块，名字必须带上方向");
-        }
+    for (const style of ["solid", "dashed", "dotted", "double", "wavy"]) {
+        const label = styleSwatchOf("underline", style).getAttribute("aria-label");
+        assert.equal(label, i18n[`style${style[0].toUpperCase()}${style.slice(1)}`]);
+        assert.notEqual(label, style, "无障碍名不能直接用 CSS 关键词");
     }
     close();
 });
 
-test("打开时开关的 checked 状态与 initialPair 一致", () => {
+test("打开时开关的勾选状态与 initialDecoration 一致", () => {
     const cases = [
+        {name: "默认：实线跟随文字色", decoration: DEFAULT_DECORATION, checked: true, expected: DEFAULT_DECORATION},
+        {name: "实线指定颜色", decoration: SOLID_DECORATION, checked: true, expected: SOLID_DECORATION},
         {
-            name: "默认：仅下划线开启",
-            pair: {
-                underline: {enabled: true, style: "solid", color: ""},
-                overline: {enabled: false, style: "solid", color: ""},
-            },
-            expected: {underline: true, overline: false},
+            name: "已关掉",
+            decoration: {...SOLID_DECORATION, enabled: false},
+            checked: false,
+            expected: {...SOLID_DECORATION, enabled: false},
         },
-        {name: "两方向都开", pair: SOLID_PAIR, expected: {underline: true, overline: true}},
         {
-            name: "两方向都关",
-            pair: {
-                underline: {enabled: false, style: "dashed", color: "#0090ff"},
-                overline: {enabled: false, style: "dotted", color: "#0090ff"},
-            },
-            expected: {underline: false, overline: false},
+            name: "enabled 不是布尔值时退回默认值",
+            decoration: {enabled: "yes", style: "dashed", color: "#0090ff"},
+            checked: true,
+            expected: {enabled: true, style: "dashed", color: "#0090ff"},
         },
     ];
     for (const item of cases) {
-        const {switchOf, controller, close} = createFixture({initialPair: item.pair});
-        assert.equal(switchOf("underline").checked, item.expected.underline, `下划线开关：${item.name}`);
-        assert.equal(switchOf("overline").checked, item.expected.overline, `上划线开关：${item.name}`);
-        assert.deepEqual(toHost(controller.getPair()), item.pair, `面板持有的初始配置：${item.name}`);
+        const {switchOf, checkedOf, controller, close} = createFixture({initialDecoration: item.decoration});
+        assert.equal(checkedOf("underline"), item.checked, `开关勾选态：${item.name}`);
+        assert.equal(
+            switchOf("underline").getAttribute("aria-checked"),
+            String(item.checked),
+            `aria-checked：${item.name}`,
+        );
+        assert.deepEqual(toHost(controller.getDecoration()), item.expected, `面板持有的配置：${item.name}`);
         close();
     }
 });
@@ -496,26 +503,25 @@ test("选中项带 aria-pressed 与自定义 class，未选中项不带", () => 
     assert.ok(solid.classList.contains("sue-swatch--selected"));
     assert.equal(dashed.getAttribute("aria-pressed"), "false");
     assert.ok(!dashed.classList.contains("sue-swatch--selected"));
-    // 初始 pair 的下划线颜色是 #e5484d，上划线跟随文字色
+    // 初值的颜色是 #e5484d，因此第一块颜色色块选中；跟随色块不该同时亮着
     assert.ok(colorSwatchesOf("underline")[0].classList.contains("sue-swatch--selected"));
-    assert.ok(followSwatchOf("overline").classList.contains("sue-swatch--selected"));
+    assert.ok(!followSwatchOf("underline").classList.contains("sue-swatch--selected"));
     close();
 });
 
 test("默认配置打开面板时，下划线的直线色块就是选中态", () => {
     // 用户报过「下划线开关默认开启，但没有出现下划线」。
-    // 面板默认 pair 就是「跟随文字颜色 + 直线」，因此首屏必须把 solid 摆成选中：
+    // 面板默认就是「跟随文字颜色 + 直线」，因此首屏必须把 solid 摆成选中：
     // 开关亮着、线型色块一个都不亮，用户无从判断当前到底是什么线
-    const {styleSwatchOf, styleSwatchesOf, switchOf, followSwatchOf, controller, close} = createFixture({
-        initialPair: DEFAULT_PAIR,
+    const {styleSwatchOf, styleSwatchesOf, checkedOf, followSwatchOf, controller, close} = createFixture({
+        initialDecoration: DEFAULT_DECORATION,
     });
-    assert.deepEqual(toHost(controller.getPair()), DEFAULT_PAIR, "面板不得改动默认配置本身");
+    assert.deepEqual(toHost(controller.getDecoration()), DEFAULT_DECORATION, "面板不得改动默认配置本身");
 
-    assert.equal(switchOf("underline").checked, true, "下划线开关默认是开的");
+    assert.equal(checkedOf("underline"), true, "下划线开关默认是开的");
     const solid = styleSwatchOf("underline", "solid");
     assert.equal(solid.getAttribute("aria-pressed"), "true", "solid 色块默认必须选中");
     assert.ok(solid.classList.contains("sue-swatch--selected"), "选中态 class 也要给，主题才能读出来");
-    assert.equal(solid.disabled, false, "方向开着，线型色块可点");
     // 整排只允许一个选中项：solid 亮着而另一个也亮着，等于没有默认线型
     const pressed = styleSwatchesOf("underline").filter((swatch) => swatch.getAttribute("aria-pressed") === "true");
     assert.deepEqual(
@@ -525,78 +531,107 @@ test("默认配置打开面板时，下划线的直线色块就是选中态", ()
     );
     // 默认色是跟随文字颜色，于是跟随色块也必须是选中态，整行才不会一个都没选中
     assert.equal(followSwatchOf("underline").getAttribute("aria-pressed"), "true");
-    // 上划线默认关着：控件禁用但选中态仍按各自的配置画，不因此串到下划线那一行
-    assert.equal(switchOf("overline").checked, false);
-    assert.equal(styleSwatchOf("overline", "solid").getAttribute("aria-pressed"), "true");
-    assert.equal(styleSwatchOf("overline", "solid").disabled, true);
     close();
 });
 
-test("默认 pair 下点直线色块不产生改动（它已经是当前线型）", () => {
+test("默认配置下点直线色块不产生改动（它已经是当前线型）", () => {
     // 首屏就选中 solid，点它等于没点意图；面板据此不回调，也不会白白重排一次装饰
-    const {styleSwatchOf, changes, close} = createFixture({initialPair: DEFAULT_PAIR});
-    styleSwatchOf("underline", "solid").click();
-    assert.equal(changes().length, 0, "点已选中的线型色块不应产生改动");
+    const {countOf, close} = activate((f) => f.styleSwatchOf("underline", "solid"), {
+        initialDecoration: DEFAULT_DECORATION,
+    });
+    assert.equal(countOf("change"), 0, "点已选中的线型色块不应产生改动");
     close();
 });
 
 // ------------------------------------------------------------------ 交互
 
-test("点击线型色块后 onChange 收到该方向的新线型，另一个方向不受影响", () => {
-    const {styleSwatchesOf, changes, lastChange, controller, close} = createFixture();
-    styleSwatchesOf("underline")[2].click();
-    assert.equal(changes().length, 1);
-    assert.deepEqual(lastChange().underline, {enabled: true, style: "dotted", color: "#e5484d"});
-    assert.deepEqual(lastChange().overline, {enabled: true, style: "wavy", color: ""});
-    assert.equal(styleSwatchesOf("underline")[2].getAttribute("aria-pressed"), "true", "选中的样式随之迁移");
+test("点击线型色块后 onChange 收到新的线型，其余字段原样带过", () => {
+    const {lastChange, countOf, styleSwatchesOf, controller, close} = activate(
+        (f) => f.styleSwatchesOf("underline")[2],
+    );
+    assert.equal(countOf("change"), 1);
+    assert.deepEqual(lastChange(), {enabled: true, style: "dotted", color: "#e5484d"});
+    // 选中的样式随之迁移，面板虽然已经收起，控件上的选中态仍是最后那一版
+    assert.equal(styleSwatchesOf("underline")[2].getAttribute("aria-pressed"), "true");
     assert.equal(styleSwatchesOf("underline")[0].getAttribute("aria-pressed"), "false");
-    assert.equal(toHost(controller.getPair()).underline.style, "dotted");
+    assert.equal(toHost(controller.getDecoration()).style, "dotted");
     close();
 });
 
-test("点击开关关闭某方向后 onChange 收到 enabled false，再打开则恢复", () => {
-    const {switchOf, changes, lastChange, close} = createFixture();
-    switchOf("overline").click();
-    assert.equal(changes().length, 1);
-    assert.equal(lastChange().overline.enabled, false);
-    assert.equal(lastChange().underline.enabled, true, "只动被点的那个方向");
-    assert.equal(switchOf("overline").checked, false);
+test("点任何一类控件都会收起面板，且 onClose 恰好一次", () => {
+    // 与思源自己的颜色菜单一致：挑完就收起，浮动工具栏与选区留在原地。
+    // 收面板绝不能吃掉那次改动，也不能被触发两次
+    // 每一项给出「点它应当报上来的回调」与次数。临时自定义色色块按定义就是当前正在用的那个颜色，
+    // 点它因此没有任何新意图，只有「面板确实收掉了」这一条可以证明它的监听是活的
+    const steps = [
+        ["线型色块", (f) => f.styleSwatchOf("underline", "wavy"), {}, "change", 1],
+        ["颜色色块", (f) => f.colorSwatchesOf("underline")[5], {}, "change", 1],
+        ["跟随文字色色块", (f) => f.followSwatchOf("underline"), {}, "change", 1],
+        ["临时自定义色色块", (f) => f.customSwatchOf("underline"), {initialDecoration: CUSTOM_DECORATION}, "change", 0],
+        ["方向开关", (f) => f.switchOf("underline"), {}, "change", 1],
+        ["清除装饰", (f) => f.actionButton("clear"), {}, "clear", 1],
+        ["撤销", (f) => f.actionButton("undo"), {}, "undo", 1],
+        ["原生取色器", () => {}, {pickColor: "#123456"}, "change", 1],
+    ];
+    for (const [name, element, options, applied, expected] of steps) {
+        const fixture = activate(element, options);
+        assert.equal(fixture.countOf("close"), 1, `${name} 必须恰好收起面板一次`);
+        assert.equal(fixture.countOf(applied), expected, `${name} 的改动必须先落地再收面板`);
+        fixture.close();
+    }
+});
 
-    switchOf("overline").click();
-    assert.equal(changes().length, 2);
-    assert.equal(lastChange().overline.enabled, true);
+test("原生取色器挑完颜色：先应用，再清选区并收浮动工具栏，面板也收起", () => {
+    // 这条路径与其它控件正好相反：系统取色对话框强制拿走焦点，编辑器与浮动工具栏都已收摊，
+    // 于是干脆把选区也清掉，不再试着恢复它
+    const {lastChange, countOf, close} = activate(() => {}, {pickColor: "#654321"});
+    assert.deepEqual(lastChange(), {enabled: true, style: "solid", color: "#654321"}, "颜色照常落到装饰上");
+    assert.equal(countOf("picked"), 1, "必须请调用方把选区与浮动工具栏收掉");
+    assert.equal(countOf("close"), 1, "面板自己也要收起");
+    close();
+});
+
+test("预设色块与跟随色块都不请调用方收浮动工具栏", () => {
+    // 只有取色器是例外；其余控件必须保留选区与浮动工具栏
+    const preset = activate((f) => f.colorSwatchesOf("underline")[5]);
+    assert.equal(preset.countOf("picked"), 0, "预设色块不碰浮动工具栏");
+    preset.close();
+
+    const follow = activate((f) => f.followSwatchOf("underline"));
+    assert.equal(follow.countOf("picked"), 0, "跟随文字色色块不碰浮动工具栏");
+    follow.close();
+});
+
+test("点击开关后 onChange 收到 enabled false", () => {
+    const {lastChange, countOf, checkedOf, close} = activate((f) => f.switchOf("underline"));
+    assert.equal(countOf("change"), 1);
+    assert.equal(lastChange().enabled, false);
+    assert.equal(checkedOf("underline"), false, "开关的勾选态跟着走");
     close();
 });
 
 test("点击预设色块后 onChange 收到白名单内的颜色值", () => {
-    const {colorSwatchesOf, model, changes, lastChange, close} = createFixture();
-    colorSwatchesOf("underline")[5].click();
-    assert.equal(changes().length, 1);
-    assert.equal(lastChange().underline.color, "#0090ff");
-
-    const neutral = colorSwatchesOf("underline")[9];
-    neutral.click();
-    assert.equal(lastChange().underline.color, "var(--b3-font-color8)", "思源主题变量是合法颜色值");
-    assert.equal(lastChange().underline.color, model.sanitizeColor(neutral.getAttribute("data-sue-color")));
+    const {lastChange, close} = activate((f) => f.colorSwatchesOf("underline")[5]);
+    assert.deepEqual(lastChange(), {enabled: true, style: "solid", color: "#0090ff"});
     close();
 });
 
-test("点击跟随文字色色块与自定义取色器都会更新该方向的颜色", () => {
-    const {followSwatchOf, customInputOf, lastChange, changes, close} = createFixture();
-    followSwatchOf("underline").click();
-    assert.equal(lastChange().underline.color, "", "跟随文字色即颜色为空串");
+test("主题变量是合法颜色值，原样回写", () => {
+    const {lastChange, model, close} = activate((f) => f.colorSwatchesOf("underline")[9]);
+    const neutral = lastChange().color;
+    assert.equal(neutral, "var(--b3-font-color8)", "思源主题变量是合法颜色值");
+    assert.equal(neutral, model.sanitizeColor("var(--b3-font-color8)"));
+    close();
+});
 
-    const input = customInputOf("underline");
-    input.value = "#123456";
-    input.dispatchEvent(new input.ownerDocument.defaultView.Event("change", {bubbles: true}));
-    assert.equal(changes().length, 2);
-    assert.equal(lastChange().underline.color, "#123456");
+test("点击跟随文字色色块把颜色清回跟随", () => {
+    const {lastChange, close} = activate((f) => f.followSwatchOf("underline"));
+    assert.deepEqual(lastChange(), {enabled: true, style: "solid", color: ""}, "跟随文字色即颜色为空串");
     close();
 });
 
 test("颜色是跟随文字色时跟随色块读作选中，挑了具体颜色就不再是", () => {
-    const FOLLOW_UNDERLINE = {underline: {enabled: true, style: "solid", color: ""}, overline: DEFAULT_PAIR.overline};
-    const follow = createFixture({initialPair: FOLLOW_UNDERLINE});
+    const follow = createFixture({initialDecoration: DEFAULT_DECORATION});
     assert.equal(
         follow.followSwatchOf("underline").getAttribute("aria-pressed"),
         "true",
@@ -606,10 +641,9 @@ test("颜色是跟随文字色时跟随色块读作选中，挑了具体颜色�
 
     // 文档里的 span 带着显式的 currentColor：读回来同样要选中跟随色块，而不是落到某个默认色上
     const restored = createFixture({
-        initialPair: toHost(
-            follow.model.readPairFromStyle(
+        initialDecoration: toHost(
+            follow.model.readDecorationFromStyle(
                 "text-decoration-line: underline; text-decoration-style: solid; text-decoration-color: currentColor",
-                null,
             ),
         ),
     });
@@ -620,30 +654,18 @@ test("颜色是跟随文字色时跟随色块读作选中，挑了具体颜色�
     );
     restored.close();
 
-    const explicit = createFixture({
-        initialPair: {underline: {enabled: true, style: "solid", color: "#46a758"}, overline: DEFAULT_PAIR.overline},
+    const explicit = activate((f) => f.followSwatchOf("underline"), {
+        initialDecoration: {enabled: true, style: "solid", color: "#46a758"},
     });
-    const followSwatch = explicit.followSwatchOf("underline");
-    assert.equal(followSwatch.getAttribute("aria-pressed"), "false", "选了具体颜色就不再是跟随");
-    // 挑一个具体颜色，再点回跟随：两个方向的选中态都要跟着走
-    followSwatch.click();
-    assert.equal(explicit.lastChange().underline.color, "");
-    assert.equal(followSwatch.getAttribute("aria-pressed"), "true", "点跟随色块必须能清回跟随");
-    explicit.colorSwatchesOf("underline")[3].click();
-    assert.equal(explicit.lastChange().underline.color, "#46a758");
-    assert.equal(followSwatch.getAttribute("aria-pressed"), "false");
+    assert.equal(explicit.lastChange().color, "", "点跟随色块必须能清回跟随");
     explicit.close();
 });
 
 test("块上已有的自定义色既回填取色器、也补一块临时色块，非 #rrggbb 的不写进取色器", () => {
-    const {section, customInputOf, colorSwatchesOf, customSwatchOf, customSwatchesOf, close} = createFixture({
-        initialPair: {
-            underline: {enabled: true, style: "solid", color: "#123456"},
-            overline: {enabled: true, style: "solid", color: "var(--b3-font-color8)"},
-        },
+    const {customInputOf, customSwatchOf, customSwatchesOf, section, colorSwatchesOf, close} = createFixture({
+        initialDecoration: CUSTOM_DECORATION,
     });
     assert.equal(customInputOf("underline").value, "#123456", "自定义色不在预设里，取色器要显示它");
-    assert.equal(customInputOf("overline").value, "#000000", "主题变量不是取色器能接受的形状，不写进去");
 
     const custom = customSwatchOf("underline");
     assert.ok(custom, "自定义色要补一块临时色块，否则整行没有任何选中项");
@@ -652,90 +674,73 @@ test("块上已有的自定义色既回填取色器、也补一块临时色块�
     assert.equal(custom.getAttribute("aria-pressed"), "true", "选中项就是这块临时色块");
     assert.equal(selectedCountIn(section("underline")), 1, "整行只允许一个选中项");
     assert.equal(selectedSwatches(colorSwatchesOf("underline")).length, 0, "不能顺带选中某个预设");
-    assert.equal(customSwatchOf("overline"), null, "主题变量正好是预设色，不需要临时色块");
-    assert.equal(colorSwatchesOf("overline")[9].getAttribute("aria-pressed"), "true");
     close();
+
+    const themeVariable = createFixture({
+        initialDecoration: {enabled: true, style: "solid", color: "var(--b3-font-color8)"},
+    });
+    assert.equal(
+        themeVariable.customInputOf("underline").value,
+        "#000000",
+        "主题变量不是取色器能接受的形状，不写进去",
+    );
+    assert.equal(themeVariable.customSwatchOf("underline"), null, "主题变量正好是预设色，不需要临时色块");
+    assert.equal(themeVariable.colorSwatchesOf("underline")[9].getAttribute("aria-pressed"), "true");
+    themeVariable.close();
 });
 
 test("挑了自定义色之后整行只有一个色块被选中，换回预设色或跟随文字色后临时色块撤掉", () => {
-    const {
-        section,
-        customInputOf,
-        followSwatchOf,
-        colorSwatchesOf,
-        customSwatchOf,
-        customSwatchesOf,
-        window,
-        lastChange,
-        close,
-    } = createFixture();
-    const pick = (value) => {
-        const input = customInputOf("underline");
-        input.value = value;
-        input.dispatchEvent(new window.Event("change", {bubbles: true}));
-    };
+    // 每一步都要重新开一个夹具：面板在任何一次激活之后都会收起自己
+    const picked = activate(() => {}, {initialDecoration: CUSTOM_DECORATION, pickColor: "#654321"});
+    assert.equal(picked.lastChange().color, "#654321");
+    assert.equal(picked.customSwatchesOf("underline").length, 1, "自定义色补一块临时色块");
+    assert.equal(picked.customSwatchOf("underline").getAttribute("aria-pressed"), "true");
+    assert.equal(selectedCountIn(picked.section("underline")), 1, "整行只允许一个选中项");
+    assert.equal(picked.colorSwatchesOf("underline").length, 11, "预设色板仍是 11 块，临时色块不算预设");
+    picked.close();
 
-    pick("#123456");
-    assert.equal(lastChange().underline.color, "#123456");
-    assert.equal(customSwatchesOf("underline").length, 1, "自定义色补一块临时色块");
-    assert.equal(customSwatchOf("underline").getAttribute("aria-pressed"), "true");
-    assert.equal(selectedCountIn(section("underline")), 1, "整行只允许一个选中项");
-    assert.equal(colorSwatchesOf("underline").length, 11, "预设色板仍是 11 块，临时色块不算预设");
+    const backToPreset = activate((f) => f.colorSwatchesOf("underline")[5], {initialDecoration: CUSTOM_DECORATION});
+    assert.equal(backToPreset.lastChange().color, "#0090ff");
+    assert.equal(backToPreset.customSwatchesOf("underline").length, 0, "换回预设色就撤掉临时色块");
+    assert.equal(backToPreset.colorSwatchesOf("underline")[5].getAttribute("aria-pressed"), "true");
+    assert.equal(selectedCountIn(backToPreset.section("underline")), 1);
+    backToPreset.close();
 
-    colorSwatchesOf("underline")[5].click();
-    assert.equal(lastChange().underline.color, "#0090ff");
-    assert.equal(customSwatchesOf("underline").length, 0, "换回预设色就撤掉临时色块");
-    assert.equal(colorSwatchesOf("underline")[5].getAttribute("aria-pressed"), "true");
-    assert.equal(selectedCountIn(section("underline")), 1);
-
-    pick("#654321");
-    assert.equal(customSwatchesOf("underline").length, 1, "再挑自定义色要重新补上");
-    followSwatchOf("underline").click();
-    assert.equal(lastChange().underline.color, "");
-    assert.equal(customSwatchesOf("underline").length, 0, "跟随文字色也要撤掉临时色块");
-    assert.equal(followSwatchOf("underline").getAttribute("aria-pressed"), "true");
-    assert.equal(selectedCountIn(section("underline")), 1);
-    close();
+    const backToFollow = activate((f) => f.followSwatchOf("underline"), {
+        initialDecoration: {enabled: true, style: "solid", color: "#654321"},
+    });
+    assert.equal(backToFollow.lastChange().color, "");
+    assert.equal(backToFollow.customSwatchesOf("underline").length, 0, "跟随文字色也要撤掉临时色块");
+    assert.equal(backToFollow.followSwatchOf("underline").getAttribute("aria-pressed"), "true");
+    assert.equal(selectedCountIn(backToFollow.section("underline")), 1);
+    backToFollow.close();
 });
 
 test("自定义色的临时色块真的可点，与预设色块行为一致", () => {
-    // 这块色块是渲染时才插进来的：只在构造期给预设色块绑事件的话，它就是个长得像按钮的死元素
-    const {customSwatchOf, window, lastChange, changes, close} = createFixture({
-        initialPair: {
-            underline: {enabled: true, style: "solid", color: "#123456"},
-            overline: {enabled: true, style: "solid", color: ""},
-        },
-    });
-    const chip = customSwatchOf("underline");
+    // 这块色块是渲染时才插进来的：只在构造期给预设色块绑事件的话，
+    // 它就是个长得一样却点不动的元素（点它面板不会收，可以据此分辨）
+    const fixture = createFixture({initialDecoration: CUSTOM_DECORATION});
+    const chip = fixture.customSwatchOf("underline");
     assert.ok(chip, "夹具前提：这里应当有一块自定义色色块");
-    assert.equal(chip.disabled, false, "它是当前正在用的颜色，必须可点");
-
-    // 挑一个别的自定义色
-    const input = chip.ownerDocument.querySelector("[data-sue-custom-color]");
-    input.value = "#654321";
-    input.dispatchEvent(new window.Event("change", {bubbles: true}));
-    assert.equal(lastChange().underline.color, "#654321");
-
-    // 再点回原来的那块：它必须还能接收事件，否则用户只能靠取色器换回同一个颜色
     chip.click();
-    assert.equal(changes().length, 2);
-    assert.equal(lastChange().underline.color, "#123456");
-    close();
+    assert.equal(fixture.countOf("change"), 0, "它正在被使用，本来就没有新意图");
+    assert.equal(fixture.countOf("close"), 1, "点击确实走到了它自己的监听上");
+    fixture.close();
+
+    // 换成别处保存的另一个自定义色之后，这一块仍能接住点击：否则用户换不回同一个颜色
+    const restored = createFixture({initialDecoration: {enabled: true, style: "solid", color: "#654321"}});
+    restored.customSwatchOf("underline").click();
+    assert.equal(restored.countOf("change"), 0, "回到另一个自定义色同样是一次提交");
+    restored.close();
 });
 
-test("方向关闭时临时色块也禁用，不是一个可点却无效的死元素", () => {
-    const {customSwatchOf, changes, close} = createFixture({
-        initialPair: {
-            underline: {enabled: false, style: "solid", color: "#123456"},
-            overline: {enabled: true, style: "solid", color: ""},
-        },
+test("方向关闭时临时色块照样可点，并顺带把下划线打开", () => {
+    const fixture = activate((f) => f.customSwatchOf("underline"), {
+        initialDecoration: {...CUSTOM_DECORATION, enabled: false},
     });
-    const chip = customSwatchOf("underline");
-    assert.ok(chip);
-    assert.equal(chip.disabled, true, "方向关闭时它不该还能被点");
-    chip.click();
-    assert.equal(changes().length, 0);
-    close();
+    assert.ok(fixture.customSwatchOf("underline"));
+    assert.deepEqual(fixture.lastChange(), CUSTOM_DECORATION, "点它就把方向打开，而不是毫无反应");
+    fixture.close();
 });
 
 test("选区内的装饰不一致时面板给出提示，改动一次之后提示消失", () => {
@@ -760,208 +765,219 @@ test("选区内的装饰一致时不显示混合提示", () => {
 });
 
 test("重复点击当前已选中的色块不触发 onChange", () => {
-    const {styleSwatchesOf, colorSwatchesOf, followSwatchOf, customInputOf, window, changes, close} = createFixture();
-    // 初始 pair 的下划线已经是 solid + #e5484d，上划线已经跟随文字色
-    styleSwatchesOf("underline")[0].click();
-    colorSwatchesOf("underline")[0].click();
-    followSwatchOf("overline").click();
-    // 取色器重新挑出同一个颜色同理：四类控件都要挡住「无变化的提交」
-    const input = customInputOf("underline");
+    // 四类控件都要挡住「无变化的提交」：点已在用的值没有任何新意图，不该多一次保存
+    const cases = [
+        ["线型色块", (f) => f.styleSwatchOf("underline", "solid"), SOLID_DECORATION],
+        ["颜色色块", (f) => f.colorSwatchesOf("underline")[0], SOLID_DECORATION],
+        ["跟随文字色色块", (f) => f.followSwatchOf("underline"), DEFAULT_DECORATION],
+    ];
+    for (const [name, element, initialDecoration] of cases) {
+        const {countOf, close} = activate(element, {initialDecoration});
+        assert.equal(countOf("change"), 0, `${name} 点已选中的项不该产生改动`);
+        close();
+    }
+    // 取色器重新挑出同一个颜色同理
+    const picked = createFixture({initialDecoration: SOLID_DECORATION});
+    const input = picked.customInputOf("underline");
     input.value = "#e5484d";
-    input.dispatchEvent(new window.Event("change", {bubbles: true}));
-    assert.equal(changes().length, 0, "点已选中的项没有任何新意图，不该多一次保存");
-
-    styleSwatchesOf("underline")[1].click();
-    assert.equal(changes().length, 1);
-    styleSwatchesOf("underline")[1].click();
-    assert.equal(changes().length, 1, "换过之后再点回来也不重复回调");
-    close();
+    input.dispatchEvent(new picked.window.Event("change", {bubbles: true}));
+    assert.equal(picked.countOf("change"), 0, "取色器挑出当前颜色同样没有新意图");
+    picked.close();
 });
 
 test("点击清除装饰与撤销分别调用 onClear 与 onUndo", () => {
-    const {actionButton, countOf, close} = createFixture({undoEnabled: true});
-    const clear = actionButton("clear");
-    const undo = actionButton("undo");
-    assert.ok(clear.classList.contains("b3-button"), "动作按钮复用思源既有的 b3-button");
-    assert.ok(undo.classList.contains("b3-button"));
-    assert.equal(undo.disabled, false);
+    const clear = activate((f) => f.actionButton("clear"));
+    assert.equal(clear.countOf("clear"), 1);
+    clear.close();
 
-    clear.click();
-    assert.equal(countOf("clear"), 1);
+    const undo = activate((f) => f.actionButton("undo"));
+    assert.equal(undo.countOf("undo"), 1);
+    undo.close();
+});
+
+test("撤销永远可点：撤销栈空时点它什么也不改", () => {
+    // 面板不再有「暂无可撤销」这回事：按钮永远可点，栈空时它就是一次什么也不做的空操作。
+    // 代价是失去了那条视觉提示，换来的是面板里没有一个按了没反应的控件
+    const {actionButton, countOf, close} = createFixture();
+    const undo = actionButton("undo");
+    assert.equal(undo.hasAttribute("disabled"), false, "撤销按钮不带 disabled");
+    assert.equal(undo.getAttribute("aria-disabled"), null, "也不拿 aria-disabled 换皮");
     undo.click();
-    assert.equal(countOf("undo"), 1);
+    assert.equal(countOf("undo"), 1, "点击照常派发，栈是否为空由调用方判断");
     close();
 });
 
-test("undoEnabled 为 false 时撤销按钮禁用且点击无效", () => {
-    const {actionButton, countOf, close} = createFixture({undoEnabled: false});
-    const undo = actionButton("undo");
-    assert.equal(undo.disabled, true);
-    undo.click();
-    assert.equal(countOf("undo"), 0, "禁用按钮不应触发回调");
-    close();
-});
-
-test("getPair 返回快照，改动它不会污染面板内部状态", () => {
+test("getDecoration 返回快照，改动它不会污染面板内部状态", () => {
     const {styleSwatchesOf, controller, close} = createFixture();
     styleSwatchesOf("underline")[1].click();
-    const snapshot = controller.getPair();
-    snapshot.underline.style = "wavy";
-    assert.equal(styleSwatchesOf("underline")[1].getAttribute("aria-pressed"), "true", "面板状态没有被外部改掉");
-    assert.equal(toHost(controller.getPair()).underline.style, "dashed");
+    const snapshot = controller.getDecoration();
+    snapshot.style = "wavy";
+    assert.equal(toHost(controller.getDecoration()).style, "dashed", "面板状态没有被外部改掉");
     close();
 });
 
-test("setPair 用外部读回的配置刷新控件，且不触发 onChange", () => {
-    const {controller, switchOf, styleSwatchesOf, followSwatchOf, colorSwatchesOf, changes, close} = createFixture();
+test("setDecoration 用外部读回的配置刷新控件，且不触发 onChange", () => {
+    const {controller, checkedOf, styleSwatchesOf, followSwatchOf, close} = createFixture();
     // 清除装饰 / 撤销之后由调用方把真实状态读回来回填：这不是用户操作，不该回调 onChange
-    const cleared = {
-        underline: {enabled: false, style: "dashed", color: ""},
-        overline: {enabled: false, style: "dotted", color: "var(--b3-font-color8)"},
-    };
-    controller.setPair(cleared);
-    assert.equal(changes().length, 0, "外部回填不是用户意图，不能回调 onChange");
-    assert.equal(switchOf("underline").checked, false, "开关要跟着灭掉");
-    assert.equal(switchOf("overline").checked, false);
+    const cleared = {enabled: false, style: "dashed", color: ""};
+    controller.setDecoration(cleared);
+    assert.equal(controller.getDecoration().style, "dashed");
+    assert.equal(checkedOf("underline"), false, "开关要跟着灭掉");
     assert.equal(styleSwatchesOf("underline")[1].getAttribute("aria-pressed"), "true", "线型选中态也要刷新");
-    assert.equal(styleSwatchesOf("overline")[2].getAttribute("aria-pressed"), "true");
-    assert.ok(followSwatchOf("underline").classList.contains("sue-swatch--selected"));
-    assert.equal(colorSwatchesOf("overline")[9].getAttribute("aria-pressed"), "true");
     assert.equal(styleSwatchesOf("underline")[0].getAttribute("aria-pressed"), "false", "旧选中态要清掉");
-    assert.deepEqual(toHost(controller.getPair()), cleared);
+    assert.ok(followSwatchOf("underline").classList.contains("sue-swatch--selected"), "跟随色块跟着亮起");
+    assert.equal(controller.getDecoration().color, "");
     close();
 });
 
-test("setPair 与构造一样先过白名单", () => {
+test("setDecoration 与构造一样先过白名单", () => {
     const {controller, close} = createFixture();
-    controller.setPair({
-        underline: {enabled: true, style: "zigzag", color: "red;position:fixed"},
-        overline: {enabled: "yes", style: "wavy", color: "#ABC"},
-    });
-    const pair = toHost(controller.getPair());
-    assert.equal(pair.underline.color, "", "脏颜色退回跟随文字色");
-    assert.equal(pair.underline.style, "solid", "非法线型退回 solid");
-    assert.equal(pair.underline.enabled, true, "布尔以外的 enabled 退回默认值");
-    assert.equal(pair.overline.style, "wavy");
-    assert.equal(pair.overline.color, "#ABC");
+    controller.setDecoration({enabled: "yes", style: "zigzag", color: "red;position:fixed"});
+    const decoration = toHost(controller.getDecoration());
+    assert.equal(decoration.color, "", "脏颜色退回跟随文字色");
+    assert.equal(decoration.style, "solid", "非法线型退回 solid");
+    assert.equal(decoration.enabled, true, "布尔以外的 enabled 退回默认值");
     close();
 });
 
 // ------------------------------------------------------------------ 焦点
 
-// 面板上的控件全是 button 与 input：按下时浏览器默认把焦点从 contenteditable 带走，
-// 而思源一失焦就清掉选区，面板记下的坐标随即失去意义，用户看到的就是「点一下取消选中」。
-// 因此面板必须在自己的范围内吃掉 mousedown 的默认行为。jsdom 不会因为派发事件而移动焦点，
-// 这里断言的是契约本身（defaultPrevented）以及控件仍然响应，端到端要留给真实思源验证。
+// 面板里的每一个控件都必须是非可聚焦的。
+//
+// 思源自己的菜单项用的是 <div class="b3-list-item">：不可聚焦，点它不会把焦点从 contenteditable
+// 带走，因此思源不会失焦、选区也就活着，浮动工具栏同样留在原地。面板里的控件必须满足同一条契约 ——
+// 只要有一个控件是可聚焦的，按下时浏览器就会把焦点交给它，编辑器随即清掉选区，
+// 浮动工具栏也跟着收起，而面板记下的字符偏移不再指向用户的文字，
+// 随后那次包裹取出的会是别的内容（曾经把用户的字写成了空白）。
+//
+// 判定不逐个控件做，而是整棵子树扫一遍可聚焦入口：多出一个 button / input / 带 tabindex 的元素就会红。
 
-test("面板根与每一类控件上的 mousedown 都被拦下，焦点因此留在编辑器", () => {
-    const {panel, switchOf, styleSwatchOf, colorSwatchesOf, followSwatchOf, customInputOf, actionButton, fire, close} =
-        createFixture({undoEnabled: true, initialPair: DEFAULT_PAIR});
-    const targets = [
-        ["面板根", panel],
-        ["面板内的非控件", panel.querySelector("[data-sue-title]")],
-        ["线型色块", styleSwatchOf("underline", "wavy")],
-        ["颜色色块", colorSwatchesOf("underline")[5]],
-        ["跟随文字色色块", followSwatchOf("underline")],
-        ["方向开关", switchOf("underline")],
-        ["取色器", customInputOf("underline")],
-        ["清除装饰", actionButton("clear")],
-        ["撤销", actionButton("undo")],
-    ];
-    for (const [name, target] of targets) {
-        const event = fire(target, "mousedown", {cancelable: true});
-        assert.equal(event.defaultPrevented, true, `${name} 上的 mousedown 必须被拦下`);
-    }
+/**
+ * 可聚焦入口的选择器。
+ *
+ * tabindex 属性本身就把元素变成可聚焦区域：即使取 -1（不进 tab 序列）也仍然会被按下聚焦，
+ * 因此这里连它一并算作可聚焦；唯一的例外是原生取色器，它没法做成不可聚焦（见下方断言）。
+ * [contenteditable] 同样算：可编辑区里的任意一段文字都是能抢到焦点的。
+ */
+const FOCUSABLE_SELECTOR =
+    "button, input:not([data-sue-custom-color]), select, textarea, a[href], iframe, object, embed, " +
+    "audio[controls], video[controls], [contenteditable], [tabindex]";
+
+test("面板里没有任何可聚焦的控件：按下它们不会把焦点带离编辑器", () => {
+    const {panel, close} = createFixture();
+    const focusable = Array.from(panel.querySelectorAll(FOCUSABLE_SELECTOR));
+    assert.deepEqual(
+        focusable.map((element) => element.tagName),
+        [],
+        `面板里出现了可聚焦元素：${focusable.map((element) => element.outerHTML).join(" | ")}`,
+    );
+
+    // 夹具前提：面板确实造出了控件，上面那条断言才不是空转
+    assert.equal(panel.querySelectorAll("[data-sue-style]").length, 5);
+    assert.equal(panel.querySelectorAll("[data-sue-action]").length, 2);
     close();
 });
 
-test("拦下 mousedown 之后，各类控件仍然响应", () => {
-    // preventDefault 只吃掉 mousedown 的默认行为（焦点转移与起拖），click 照常派发
+test("面板里唯一可聚焦的控件是原生取色器，插件不再拦任何按下的默认行为", () => {
+    const {panel, customInputOf, close} = createFixture();
+    const picker = customInputOf("underline");
+    // input[type=color] 在浏览器里是既有的可聚焦控件，做不到不可聚焦，因此这里只标出它、不假装它安全
+    assert.equal(picker.tagName, "INPUT");
+    assert.equal(picker.type, "color");
+    assert.equal(picker.getAttribute("data-sue-custom-color"), "");
+    assert.equal(
+        panel.querySelectorAll("input").length,
+        1,
+        "面板里只允许这一个 input：多出来的可聚焦控件会立刻破坏选区",
+    );
+
+    // 面板不再与浏览器默认行为对抗：控件本来就不可聚焦，没有可拦的东西
+    const {styleSwatchOf, fire} = createFixture();
+    assert.equal(fire(styleSwatchOf("underline", "wavy"), "mousedown", {cancelable: true}).defaultPrevented, false);
+    close();
+});
+
+test("每一类控件都带 role 与无障碍名", () => {
+    const {panel, close} = createFixture();
+    const controls = Array.from(
+        panel.querySelectorAll(
+            "[data-sue-style], [data-sue-color], [data-sue-follow-color], " +
+                "[data-sue-switch], [data-sue-action]",
+        ),
+    );
+    assert.equal(controls.length, 5 + 11 + 1 + 1 + 2, "夹具前提：这些就是面板上的全部控件");
+    for (const control of controls) {
+        assert.notEqual(control.getAttribute("role"), null, `控件必须带 role：${control.outerHTML}`);
+        assert.notEqual(control.getAttribute("aria-label"), null, `控件必须带 aria-label：${control.outerHTML}`);
+        assert.equal(
+            control.getAttribute("tabindex"),
+            null,
+            `控件不得带 tabindex：带了就仍然可聚焦，按下照样夺走焦点（${control.outerHTML}）`,
+        );
+    }
+    // 颜色色块上没有可见文字，无障碍名因此取颜色原值；「跟随文字色」那块的字母 A 读不出意思，名字取自 i18n
+    assert.equal(panel.querySelector('[data-sue-color="#e5484d"]').getAttribute("aria-label"), "#e5484d");
+    assert.equal(panel.querySelector("[data-sue-follow-color]").getAttribute("aria-label"), i18n.followTextColor);
+    assert.equal(panel.querySelector("[data-sue-action='clear']").getAttribute("aria-label"), i18n.clearDecoration);
+    assert.equal(panel.querySelector("[data-sue-switch]").getAttribute("aria-label"), i18n.underline);
+    close();
+});
+
+test("临时插入的自定义色色块同样不是可聚焦元素", () => {
+    // 这块色块是在渲染时才插进面板子树的：只盯构造期那一批控件的话，它就是个能抢焦点的漏网之鱼
+    const {panel, customSwatchOf, close} = createFixture({initialDecoration: CUSTOM_DECORATION});
+    const chip = customSwatchOf("underline");
+    assert.ok(chip, "夹具前提：这里应当有一块自定义色色块");
+    assert.equal(chip.matches(FOCUSABLE_SELECTOR), false, `临时色块也必须不可聚焦：${chip.outerHTML}`);
+    assert.equal(panel.querySelectorAll("[tabindex]").length, 0, "面板里一个 tabindex 都不该有");
+    close();
+});
+
+test("完整的按下-点击序列下，各类控件仍然响应", () => {
+    // 控件不是 input，因此没有原生的激活行为可用：click 事件本身就是全部
     const {
-        switchOf,
         styleSwatchOf,
-        colorSwatchesOf,
-        followSwatchOf,
-        actionButton,
         press,
-        changes,
-        lastChange,
         countOf,
+        lastChange,
         close,
-    } = createFixture({undoEnabled: true, initialPair: DEFAULT_PAIR});
+    } = createFixture();
 
     press(styleSwatchOf("underline", "wavy"));
-    assert.equal(changes().length, 1);
-    assert.equal(lastChange().underline.style, "wavy");
-
-    press(colorSwatchesOf("underline")[5]);
-    assert.equal(changes().length, 2);
-    assert.equal(lastChange().underline.color, "#0090ff");
-
-    press(followSwatchOf("underline"));
-    assert.equal(changes().length, 3);
-    assert.equal(lastChange().underline.color, "");
-
-    // 开关的勾选由浏览器在 click 的激活行为里翻转，因此照样可用
-    press(switchOf("overline"));
-    assert.equal(changes().length, 4);
-    assert.equal(lastChange().overline.enabled, true);
-
-    press(actionButton("clear"));
-    press(actionButton("undo"));
-    assert.equal(countOf("clear"), 1);
-    assert.equal(countOf("undo"), 1);
+    assert.equal(countOf("change"), 1);
+    assert.equal(lastChange().style, "wavy");
+    assert.equal(countOf("close"), 1, "按下-点击同样收面板");
     close();
+
+    const colour = createFixture();
+    colour.press(colour.colorSwatchesOf("underline")[5]);
+    assert.equal(colour.countOf("change"), 1);
+    assert.equal(colour.lastChange().color, "#0090ff");
+    colour.close();
+
+    const follow = createFixture();
+    follow.press(follow.followSwatchOf("underline"));
+    assert.equal(follow.countOf("change"), 1);
+    assert.equal(follow.lastChange().color, "");
+    follow.close();
+
+    const clear = createFixture();
+    clear.press(clear.actionButton("clear"));
+    assert.equal(clear.countOf("clear"), 1);
+    clear.close();
 });
 
-test("移动端同样只拦 mousedown，不碰 touchstart", () => {
+test("移动端走 touchend 绑定，收面板的规则与桌面端一致", () => {
     // preventDefault 掉 touchstart 会连带取消浏览器补发的 click 与触摸的默认滚动，
-    // 面板会既点不动也滚不动；触摸设备上按钮本来也不会抢焦点，mousedown 一道足够
-    const {styleSwatchOf, fire, changes, lastChange, close} = createFixture({frontend: "mobile"});
-    const mousedown = fire(styleSwatchOf("underline", "wavy"), "mousedown", {cancelable: true});
-    assert.equal(mousedown.defaultPrevented, true, "移动端也要拦住会把焦点带走的按下");
-
-    const touchstart = fire(styleSwatchOf("underline", "wavy"), "touchstart", {cancelable: true});
-    assert.equal(touchstart.defaultPrevented, false, "touchstart 不能拦：会连点击与滚动一起取消");
+    // 面板会既点不动也滚不动；触摸设备上按钮本来也不会抢焦点，因此一条 mousedown 守卫都不需要
+    const {styleSwatchOf, fire, countOf, lastChange, close} = createFixture({frontend: "mobile"});
+    assert.equal(fire(styleSwatchOf("underline", "wavy"), "mousedown", {cancelable: true}).defaultPrevented, false);
+    assert.equal(fire(styleSwatchOf("underline", "wavy"), "touchstart", {cancelable: true}).defaultPrevented, false);
 
     fire(styleSwatchOf("underline", "wavy"), "touchend");
-    assert.equal(changes().length, 1);
-    assert.equal(lastChange().underline.style, "wavy");
-    close();
-});
-
-test("拦下面板内的 mousedown 之后，面板内外的点击行为都不变", () => {
-    const {panel, document, fire, countOf, close} = createFixture();
-    // 面板内：mousedown 被拦下，click 仍冒泡到 document，靠 contains 排除在「面板外」之外
-    const inside = fire(panel.querySelector("[data-sue-action='clear']"), "mousedown", {cancelable: true});
-    assert.equal(inside.defaultPrevented, true);
-    fire(panel.querySelector("[data-sue-action='clear']"), "click");
-    assert.equal(countOf("close"), 0, "面板内部的点击不能被当成「面板外」");
-
-    // 面板与锚点之外：面板管不着，按下不拦，click 照样关闭面板
-    const outside = document.createElement("div");
-    document.body.appendChild(outside);
-    const outsideDown = fire(outside, "mousedown", {cancelable: true});
-    assert.equal(outsideDown.defaultPrevented, false, "面板外的按下不受面板影响");
-    assert.equal(countOf("close"), 0, "面板只监听自己的事件名，面板外的 mousedown 不关闭面板");
-    fire(outside, "click");
-    assert.equal(countOf("close"), 1, "面板外的点击仍然关闭面板");
-    close();
-});
-
-test("destroy 之后不再拦 mousedown", () => {
-    const {document, controller, styleSwatchesOf, fire, countOf, changes, close} = createFixture({undoEnabled: true});
-    const before = fire(styleSwatchesOf("underline")[3], "mousedown", {cancelable: true});
-    assert.equal(before.defaultPrevented, true, "夹具前提：销毁前监听是活的");
-
-    const detached = styleSwatchesOf("underline")[3];
-    controller.destroy();
-    // 面板元素已从 DOM 摘掉，但监听若还留在它身上，脱管控件上的按下仍会被拦
-    const after = fire(detached, "mousedown", {cancelable: true});
-    assert.equal(after.defaultPrevented, false, "destroy 之后不该再有 mousedown 处理");
-    fire(document.body, "click");
-    assert.equal(countOf("close"), 0, "销毁后面板不该再响应任何关闭入口");
-    assert.equal(changes().length, 0);
+    assert.equal(countOf("change"), 1);
+    assert.equal(lastChange().style, "wavy");
+    assert.equal(countOf("close"), 1, "移动端同样收面板");
     close();
 });
 
@@ -969,7 +985,8 @@ test("destroy 之后不再拦 mousedown", () => {
 
 test("面板内的点击不关闭，面板外的点击与 Esc 才关闭", () => {
     const {panel, document, fire, countOf, close} = createFixture();
-    panel.querySelector("[data-sue-action='clear']").click();
+    // 面板里的非控件：点它既不改设置也不该被当成「面板外」
+    fire(panel.querySelector("[data-sue-title]"), "click");
     assert.equal(countOf("close"), 0, "面板内部的点击不能被当成「面板外」");
     document.body.dispatchEvent(new document.defaultView.MouseEvent("click", {bubbles: true}));
     assert.equal(countOf("close"), 1);
@@ -1141,7 +1158,7 @@ test("左右两侧都放得下时优先选右边那一侧", () => {
     const {placement} = createFixture();
     const selection = rect(330, 0, 340, 768);
     const {chosen, rect: placed} = place(placement, selection);
-    assert.equal(chosen.side, "right", "右边与左边都能避开时，按候选顺序取右边");
+    assert.equal(chosen.side, "right", "右侧与左侧都能避开时，按候选顺序取右侧");
     assert.equal(overlaps(placed, selection), false);
 });
 
@@ -1355,7 +1372,7 @@ test("移动端走同一套定位：面板同样避开整段选区", () => {
 });
 
 test("移动端前端改用 touchend 绑定，并给面板加上滚动兜底", () => {
-    const {panel, document, styleSwatchesOf, fire, changes, lastChange, countOf, close} = createFixture({
+    const {panel, styleSwatchesOf, fire, changes, lastChange, close} = createFixture({
         frontend: "mobile",
     });
     assert.equal(panel.getAttribute("data-sue-mobile"), "true");
@@ -1366,10 +1383,14 @@ test("移动端前端改用 touchend 绑定，并给面板加上滚动兜底", (
     assert.equal(changes().length, 0, "移动端必须绑定 touchend，click 不该生效");
     fire(styleSwatchesOf("underline")[1], "touchend");
     assert.equal(changes().length, 1);
-    assert.equal(lastChange().underline.style, "dashed");
+    assert.equal(lastChange().style, "dashed");
+    close();
+});
 
+test("移动端面板外的 touchend 同样关闭面板", () => {
+    const {document, fire, countOf, close} = createFixture({frontend: "mobile"});
     fire(document.body, "touchend");
-    assert.equal(countOf("close"), 1, "面板外的 touchend 同样关闭面板");
+    assert.equal(countOf("close"), 1);
     close();
 });
 
@@ -1381,10 +1402,10 @@ test("面板文案全部取自 options.i18n，没有硬编码字面量", () => {
     });
     assert.equal(panel.querySelector("[data-sue-title]").textContent, SENTINELS.underlineEnhancement);
     assert.equal(labelOf("underline", "switch").textContent, SENTINELS.underline);
-    assert.equal(labelOf("overline", "switch").textContent, SENTINELS.overline);
     assert.equal(labelOf("underline", "style").textContent, SENTINELS.lineStyle);
-    assert.equal(labelOf("overline", "color").textContent, SENTINELS.color);
+    assert.equal(labelOf("underline", "color").textContent, SENTINELS.color);
     assert.equal(followSwatchOf("underline").title, SENTINELS.followTextColor);
+    assert.equal(followSwatchOf("underline").getAttribute("aria-label"), SENTINELS.followTextColor);
     assert.equal(customInputOf("underline").getAttribute("aria-label"), SENTINELS.customColor);
     assert.equal(actionButton("clear").textContent, SENTINELS.clearDecoration);
     assert.equal(actionButton("undo").textContent, SENTINELS.undo);
@@ -1404,7 +1425,7 @@ test("面板文案全部取自 options.i18n，没有硬编码字面量", () => {
     }
     assert.ok(
         !panel.outerHTML.includes(SENTINELS.saveFailed),
-        "saveFailed 属于 Task 6 的错误路径，面板不该用它",
+        "saveFailed 属于保存失败那条路径，面板不该用它",
     );
     assert.equal(section("underline").getAttribute("data-sue-section"), "underline");
     close();
@@ -1430,7 +1451,6 @@ test("面板实际用到的每个 i18n 键在两种语言的真实文件里都�
             "followTextColor",
             "lineStyle",
             "mixedSelection",
-            "overline",
             "styleDashed",
             "styleDotted",
             "styleDouble",
@@ -1448,20 +1468,32 @@ test("面板实际用到的每个 i18n 键在两种语言的真实文件里都�
             assert.equal(typeof table[key], "string", `${locale}.json 缺少面板用到的键 ${key}`);
             assert.notEqual(table[key].trim(), "", `${locale}.json 的 ${key} 是空串，界面上会显示空白`);
         }
+        // 两个语言文件的键集合必须一致：删掉的方向不该只在一个文件里消失
+        assert.deepEqual(
+            Object.keys(table).sort(),
+            Object.keys(readLocale(locale === "zh-CN" ? "en" : "zh-CN")).sort(),
+        );
     }
     close();
 });
 
-test("写进面板的颜色一律先过白名单，脏值既不进 DOM 也不进 getPair", () => {
+test("上划线的文案已从两种语言文件里一并删除", () => {
+    // 方向整个去掉之后，这个键不再有任何地方会请求它；留着它就是一条永远用不到的文案
+    for (const locale of ["zh-CN", "en"]) {
+        assert.equal(
+            Object.prototype.hasOwnProperty.call(readLocale(locale), "overline"),
+            false,
+            `${locale}.json 仍有 overline`,
+        );
+    }
+    assert.ok(!readFileSync(new URL("../src/panel.ts", import.meta.url), "utf8").includes('"overline"'));
+});
+
+test("写进面板的颜色一律先过白名单，脏值既不进 DOM 也不进 getDecoration", () => {
     const {panel, controller, colorSwatchesOf, close} = createFixture({
-        initialPair: {
-            underline: {enabled: true, style: "solid", color: "red;position:fixed;background:url(evil)"},
-            overline: {enabled: true, style: "solid", color: "#ABC"},
-        },
+        initialDecoration: {enabled: true, style: "solid", color: "red;position:fixed;background:url(evil)"},
     });
-    const pair = toHost(controller.getPair());
-    assert.equal(pair.underline.color, "", "非法颜色退化为跟随文字色");
-    assert.equal(pair.overline.color, "#ABC");
+    assert.equal(toHost(controller.getDecoration()).color, "", "非法颜色退化为跟随文字色");
     assert.ok(!panel.outerHTML.includes("position:fixed"), "脏值不得拼进面板样式");
     assert.ok(!panel.outerHTML.includes("url("), "脏值不得拼进面板样式");
     assert.ok(!panel.outerHTML.includes("red;"), "脏值不得残留在面板标记里");
@@ -1562,6 +1594,40 @@ test("面板根有不透明表面，且不挂思源未定义的浮层类", () =>
         ["box-sizing", "border"],
         `颜色色块规则里只应有盒模型与边框：${declarations.join("; ")}`,
     );
+});
+
+// 开关不能是思源的 b3-switch：那个类是为 input[type=checkbox] 写的，
+// 而面板里的开关必须是不可聚焦的 div（按下可聚焦的 input 会把焦点带离编辑器）。
+// 因此开关的外观与勾选态都自己画，勾选状态读的是 aria-checked。
+test("方向开关自绘外观，勾选态读 aria-checked", () => {
+    const scss = readFileSync(new URL("../src/index.scss", import.meta.url), "utf8");
+    const panelSource = readFileSync(new URL("../src/panel.ts", import.meta.url), "utf8");
+    const switchClass = /const SWITCH_CLASS = "([^"]+)"/.exec(panelSource);
+    assert.ok(switchClass, "panel.ts 里必须能读出开关的类名常量");
+    assert.equal(
+        new RegExp(`\\.${switchClass[1]}\\b`).test(scss),
+        true,
+        `index.scss 里必须有 .${switchClass[1]} 的规则：否则开关没有任何外观`,
+    );
+    assert.match(
+        scss,
+        new RegExp(`${switchClass[1]}\\[aria-checked="true"\\]`),
+        "必须按 aria-checked 画出勾选态",
+    );
+
+    const {switchOf, close} = createFixture({initialDecoration: DEFAULT_DECORATION});
+    const toggle = switchOf("underline");
+    assert.equal(toggle.className, switchClass[1]);
+    assert.equal(toggle.getAttribute("role"), "switch");
+    assert.equal(toggle.getAttribute("aria-checked"), "true", "默认配置下开关是勾上的");
+    toggle.click();
+    assert.equal(toggle.getAttribute("aria-checked"), "false", "点一下就变成未勾选");
+    close();
+    // 关掉之后线型选中态仍在，用户上一次选的线型没有丢
+    const after = createFixture({initialDecoration: {...DEFAULT_DECORATION, enabled: false}});
+    assert.equal(after.switchOf("underline").getAttribute("aria-checked"), "false");
+    assert.equal(after.styleSwatchOf("underline", "solid").getAttribute("aria-pressed"), "true");
+    after.close();
 });
 
 // 定位与样式表是一对约定：placePanel 把面板夹进 [margin, 视口宽 - 面板宽 - margin]，

@@ -1,5 +1,5 @@
 /**
- * 装饰设置面板：把一组装饰配置渲染成可点的控件，并把用户的每次改动以 IDecorationPair 的形式报给调用方。
+ * 装饰设置面板：把一份装饰配置渲染成可点的控件，并把用户的每次改动以 IDecoration 的形式报给调用方。
  *
  * 本模块只做「呈现 + 收集意图」：它不碰文档 DOM、不调内核，也不感知撤销栈的内容。
  * 谁把配置应用到选区、谁来保存与销毁，都由 src/index.ts 通过 IPanelOptions 的回调决定。
@@ -7,19 +7,22 @@
  * 面板挂在 document.body 上而不是浮动工具栏内部：IMenuItem.click 只给出 protyle 实例，
  * 拿不到触发按钮元素，而思源内部 subElement 的定位并非公开契约。
  * 因此 options.anchor 只是定位参照之一：面板要避开的是选区，坐标在插入 DOM 后量出来再夹进视口。
+ *
+ * 面板里的控件全部是不可聚焦的 div：可聚焦的元素会在按下时把焦点从 contenteditable 带走，
+ * 思源随之清掉选区，浮动工具栏也跟着收起，面板记下的字符偏移于是不再指向用户的文字。
+ * 因此点任何控件都只收面板自己（options.onClose），浮动工具栏由用户继续用。
  */
 import {getEventName} from "./dom";
 import {
     LINE_STYLES,
     PRESET_COLORS,
-    isSamePair,
+    isSameDecoration,
     sanitizeColor,
     sanitizeComputedColor,
-    sanitizePair,
+    sanitizeDecoration,
 } from "./model";
 import type {
     IDecoration,
-    IDecorationPair,
     TLineStyle,
 } from "./model";
 import {choosePlacement} from "./placement";
@@ -29,52 +32,58 @@ export interface IPanelOptions {
     /** 定位参照：思源浮动工具栏的容器元素 */
     anchor: HTMLElement;
     /** 打开时的配置，由调用方从选区回填 */
-    initialPair: IDecorationPair;
+    initialDecoration: IDecoration;
     /** 文案表；缺键时退回键名，便于一眼看出漏了哪条翻译 */
     i18n: Record<string, string>;
-    /** 撤销按钮是否可用；撤销栈本身只有 src/index.ts 知道 */
-    undoEnabled: boolean;
     /**
      * 选中文字的计算颜色，给「跟随文字色」色块上的字母上色。
      * 由调用方从选区里读一次；空值或非法值一律不上色，字母保持继承面板的正文色。
      */
     followTextColor?: string;
     /**
-     * 选区里的各区域装饰并不一致，initialPair 只是其中一份。
+     * 选区里的各区域装饰并不一致，initialDecoration 只是其中一份。
      * 面板据此先说明再让用户点：一次改动会把整个选区统一成面板当前这一份配置，
      * 不说清楚的话，第一下点击就会静默改写用户没打算动的那些区域。
      */
     mixed?: boolean;
-    onChange: (pair: IDecorationPair) => void;
+    onChange: (decoration: IDecoration) => void;
     onClear: () => void;
     onUndo: () => void;
     onClose: () => void;
+    /**
+     * 原生取色器挑完颜色之后调用：清掉选区，并收起思源的浮动工具栏。
+     *
+     * 系统取色对话框强制拿走焦点，编辑器与浮动工具栏都已随之收摊；这条路径因此不走
+     * 「保住选区」那一套，而是干脆把两者一起收干净。面板随后仍会调 onClose 收起自己。
+     * 其余控件都不碰这个回调：它们保留选区，也保留浮动工具栏。
+     */
+    onCustomColorPicked?: () => void;
 }
 
 export interface IPanelController {
     /** 当前配置的一份快照；改动返回值不会影响面板自身状态 */
-    getPair: () => IDecorationPair;
+    getDecoration: () => IDecoration;
     /**
      * 用外部读回的配置覆盖面板状态并重画控件。
      *
      * 清除装饰与撤销都由调用方直接改文档，面板自己看不到结果，得靠这里把选中态刷回来；
      * 这不是用户操作，因此不触发 onChange。第二个实参重报选区是否仍不一致（撤销之后要重新判一次）。
      */
-    setPair: (pair: IDecorationPair, mixed?: boolean) => void;
+    setDecoration: (decoration: IDecoration, mixed?: boolean) => void;
     /** 移除面板并摘掉所有监听；可重复调用 */
     destroy: () => void;
 }
 
-/** 面板的两个方向；顺序即面板里的区块顺序 */
-type TDirection = "underline" | "overline";
+/** 面板的装饰方向；插件只画下划线这一个方向 */
+type TDirection = "underline";
 
-const DIRECTIONS: readonly TDirection[] = ["underline", "overline"];
+const DIRECTIONS: readonly TDirection[] = ["underline"];
 
 // ---------------------------------------------------------------- 标记属性与类名
 
 /** 面板根标记；CSS 根选择器与外部识别都靠它 */
 const PANEL_ATTRIBUTE = "data-sue-panel";
-/** 方向区块标记，值为 underline 或 overline */
+/** 方向区块标记，值为 underline */
 const SECTION_ATTRIBUTE = "data-sue-section";
 /** 行标记，值为 switch / style / color */
 const ROW_ATTRIBUTE = "data-sue-row";
@@ -120,10 +129,8 @@ const SWATCH_CLASS = "sue-swatch";
 const ROW_CLASS = "b3-list-item sue-row";
 /** 标签沿用思源的列表标签 */
 const LABEL_CLASS = "b3-list-item-label sue-label";
-/** 开关沿用思源既有的 b3-switch */
-const SWITCH_CLASS = "b3-switch";
-/** 开关 id 前缀，label 的 for 指向它 */
-const SWITCH_ID_PREFIX = "sue-switch-";
+/** 开关自绘外观与选中态：思源的 b3-switch 是给 input[type=checkbox] 写的，面板里的开关不是 input */
+const SWITCH_CLASS = "sue-switch";
 /** 区块沿用思源的列表 */
 const SECTION_CLASS = "b3-list b3-list-bordered sue-section";
 /** 控件侧容器 */
@@ -158,15 +165,6 @@ const MOBILE_MAX_HEIGHT = "60vh";
 const MOBILE_VALUE = "true";
 /** 移动端的事件名；桌面端是 click */
 const TOUCH_EVENT = "touchend";
-/**
- * 拦下默认行为的事件名。
- *
- * 与事件名（桌面 click、移动 touchend）刻意不同：click 拦了会把控件自己也一起拦掉。
- * 只拦 mousedown：它的默认行为无非是把焦点从 contenteditable 带走、起一次拖、把选区起点落在这里，
- * 随后的 click 照常派发，控件仍然响应。
- * 不用 touchstart：它的默认行为还管着滚动与合成 click，拦掉的话面板既滚不动也点不动。
- */
-const PRESS_EVENT = "mousedown";
 /** 关闭面板的按键 */
 const ESCAPE_KEY = "Escape";
 /** 跟随文字色色块上的字母 */
@@ -189,23 +187,23 @@ const HEX_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
  */
 const SAMPLE_TEXT = "\u2002\u2002";
 
+/** 线型色块的预览线画在哪一侧；插件只画下划线，因此恒为 underline */
+const LINE_KEYWORD = "underline";
+
 /** 一个方向区块里的控件引用 */
 interface ISectionWidgets {
     section: HTMLElement;
-    toggle: HTMLInputElement;
-    styleSwatches: HTMLButtonElement[];
-    followSwatch: HTMLButtonElement;
-    colorSwatches: HTMLButtonElement[];
+    toggle: HTMLDivElement;
+    styleSwatches: HTMLDivElement[];
+    followSwatch: HTMLDivElement;
+    colorSwatches: HTMLDivElement[];
     customInput: HTMLInputElement;
     /** 当前自定义色的临时色块；不是预设色，随时可能被撤掉 */
-    customSwatch: HTMLButtonElement | null;
+    customSwatch: HTMLDivElement | null;
 }
 
-/** 复制一组配置，避免调用方改到面板内部的状态 */
-const clonePair = (pair: IDecorationPair): IDecorationPair => ({
-    underline: {...pair.underline},
-    overline: {...pair.overline},
-});
+/** 复制一份配置，避免调用方改到面板内部的状态 */
+const cloneDecoration = (decoration: IDecoration): IDecoration => ({...decoration});
 
 const createElement = <T extends HTMLElement>(doc: Document, tagName: string, className: string): T => {
     const element = doc.createElement(tagName);
@@ -216,30 +214,36 @@ const createElement = <T extends HTMLElement>(doc: Document, tagName: string, cl
 };
 
 /**
- * 线型色块：靠元素自身的 text-decoration 画出真实的线，不画图标字符也不用图片。
+ * 面板上的可点控件：一个不带 tabindex 的 div + role。
  *
- * `direction` 决定线画在文字的上方还是下方：上划线区块画上划线，
- * 两个区块的预览才不会长得一模一样，用户也才看得出这一行管的是哪一侧。
+ * 可聚焦的元素按下时会把焦点从 contenteditable 交给它，思源随之清掉选区；
+ * 于是面板记下的字符偏移不再指向用户的文字，下一次改动取出的会是别处的内容。
+ * div 不是可聚焦区域，按下它焦点原地不动，click 照常派发 —— 思源自己的菜单项正是这么做的。
+ * 刻意不写 tabindex="-1"：带 tabindex 的元素仍然可聚焦（只是不进 tab 序列），按它照样夺走焦点。
+ * role="button" 与 aria-label 一起给，因此读屏软件仍把它当成按钮并读得出名字。
+ */
+const createControl = (doc: Document, className: string, ariaLabel: string): HTMLDivElement => {
+    const control = createElement<HTMLDivElement>(doc, "div", className);
+    control.setAttribute("role", "button");
+    control.setAttribute("aria-label", ariaLabel);
+    return control;
+};
+
+/**
+ * 线型色块：靠元素自身的 text-decoration 画出真实的线，不画图标字符也不用图片。
  * 三个属性都必须写全：只写 text-decoration-style 时线型仍取自默认的 solid。
  *
- * 按钮里唯一的可见内容是示例文本（两个 EN SPACE），对读屏软件来说没有名字，因此
+ * 控件里唯一的可见内容是示例文本（两个 EN SPACE），对读屏软件来说没有名字，因此
  * aria-label 必须给。刻意不用 CSS 关键词当名字：中文界面里 "wavy" 对用户没有意义，
- * 名字取自 i18n（线型中文名 + 方向）。
+ * 名字取自 i18n 里的线型名。
  */
-const createStyleSwatch = (
-    doc: Document,
-    style: TLineStyle,
-    direction: TDirection,
-    ariaLabel: string,
-): HTMLButtonElement => {
-    const swatch = createElement<HTMLButtonElement>(doc, "button", `${BUTTON_CLASS} ${SWATCH_CLASS}`);
-    swatch.type = "button";
+const createStyleSwatch = (doc: Document, style: TLineStyle, ariaLabel: string): HTMLDivElement => {
+    const swatch = createControl(doc, `${BUTTON_CLASS} ${SWATCH_CLASS}`, ariaLabel);
     swatch.setAttribute(STYLE_ATTRIBUTE, style);
-    swatch.setAttribute("aria-label", ariaLabel);
     swatch.setAttribute("aria-pressed", "false");
     swatch.textContent = SAMPLE_TEXT;
     swatch.style.whiteSpace = "pre";
-    swatch.style.textDecorationLine = direction;
+    swatch.style.textDecorationLine = LINE_KEYWORD;
     swatch.style.textDecorationStyle = style;
     swatch.style.textDecorationColor = "currentColor";
     return swatch;
@@ -248,11 +252,11 @@ const createStyleSwatch = (
 /**
  * 颜色色块。颜色先过白名单再落到 DOM 上：这些值最终会进入持久化的文档 HTML，
  * 面板是这条链路上第一个可能拿到脏值的地方，防线必须落在最前面。
+ * 色块上没有可见文字，无障碍名因此直接取颜色原值。
  */
-const createColorSwatch = (doc: Document, color: string): HTMLButtonElement => {
+const createColorSwatch = (doc: Document, color: string): HTMLDivElement => {
     const safeColor = sanitizeColor(color);
-    const swatch = createElement<HTMLButtonElement>(doc, "button", `${BUTTON_CLASS} ${SWATCH_CLASS}`);
-    swatch.type = "button";
+    const swatch = createControl(doc, `${BUTTON_CLASS} ${SWATCH_CLASS}`, safeColor);
     swatch.setAttribute(COLOR_ATTRIBUTE, safeColor);
     swatch.setAttribute("aria-pressed", "false");
     swatch.title = safeColor;
@@ -267,9 +271,8 @@ const createColorSwatch = (doc: Document, color: string): HTMLButtonElement => {
  * 这个值过不了计算色白名单就一个属性都不写：继承来的颜色仍然读得出来，
  * 而把脏值写进 style 只会换来一条谁也没打算声明的规则。
  */
-const createFollowSwatch = (doc: Document, title: string, followTextColor: string): HTMLButtonElement => {
-    const swatch = createElement<HTMLButtonElement>(doc, "button", `${BUTTON_CLASS} ${SWATCH_CLASS}`);
-    swatch.type = "button";
+const createFollowSwatch = (doc: Document, title: string, followTextColor: string): HTMLDivElement => {
+    const swatch = createControl(doc, `${BUTTON_CLASS} ${SWATCH_CLASS}`, title);
     swatch.setAttribute(FOLLOW_ATTRIBUTE, "");
     swatch.setAttribute("aria-pressed", "false");
     swatch.textContent = FOLLOW_TEXT;
@@ -284,20 +287,30 @@ const createFollowSwatch = (doc: Document, title: string, followTextColor: strin
     return swatch;
 };
 
-const createActionButton = (doc: Document, action: string, text: string): HTMLButtonElement => {
-    const button = createElement<HTMLButtonElement>(doc, "button", BUTTON_CLASS);
-    button.type = "button";
+const createActionButton = (doc: Document, action: string, text: string): HTMLDivElement => {
+    const button = createControl(doc, BUTTON_CLASS, text);
     button.setAttribute(ACTION_ATTRIBUTE, action);
     button.textContent = text;
     return button;
 };
 
-/** 一行：左侧标签、右侧控件。label 的 for 指向控件，点文字也能操作 */
+/**
+ * 方向开关。它不能是 input[type=checkbox]：复选框是可聚焦的，按下就把焦点带离编辑器。
+ * 勾选状态因此记在 aria-checked 上，切换由面板自己完成（与色块同一个不可聚焦的 div）。
+ */
+const createSwitch = (doc: Document, direction: TDirection, ariaLabel: string): HTMLDivElement => {
+    const toggle = createControl(doc, SWITCH_CLASS, ariaLabel);
+    toggle.setAttribute("role", "switch");
+    toggle.setAttribute(SWITCH_ATTRIBUTE, direction);
+    toggle.setAttribute("aria-checked", "false");
+    return toggle;
+};
+
+/** 一行：左侧标签、右侧控件 */
 const createRow = (
     doc: Document,
     row: string,
     labelText: string,
-    labelFor: string,
     controlClassName: string,
 ): {row: HTMLElement; control: HTMLElement;} => {
     const rowElement = createElement(doc, "div", ROW_CLASS);
@@ -305,9 +318,6 @@ const createRow = (
     const label = createElement(doc, "label", LABEL_CLASS);
     label.setAttribute(LABEL_ATTRIBUTE, "");
     label.textContent = labelText;
-    if (labelFor !== "") {
-        label.setAttribute("for", labelFor);
-    }
     const control = createElement(doc, "div", controlClassName);
     rowElement.appendChild(label);
     rowElement.appendChild(control);
@@ -315,16 +325,13 @@ const createRow = (
 };
 
 /**
- * 线型色块的无障碍名：线型中文名 + 方向。
+ * 线型色块的无障碍名：线型在 i18n 里的名字。
  *
- * i18n 键按 `style` + 首字母大写的线型拼出（styleSolid / styleWavy …），
+ * 键按 `style` + 首字母大写的线型拼出（styleSolid / styleWavy …），
  * 因此新增线型只要在两个语言文件里各加一条，面板这边不用改。
- * 带上方向是因为两个区块各有一排长得一模一样的线型色块，只有名字能把它们区分开。
  */
-const lineStyleName = (translate: (key: string) => string, style: TLineStyle, direction: TDirection): string => {
-    const name = translate(`style${style[0].toUpperCase()}${style.slice(1)}`);
-    return `${name} · ${translate(direction)}`;
-};
+const lineStyleName = (translate: (key: string) => string, style: TLineStyle): string =>
+    translate(`style${style[0].toUpperCase()}${style.slice(1)}`);
 
 const buildSection = (
     doc: Document,
@@ -335,25 +342,19 @@ const buildSection = (
     const section = createElement(doc, "section", SECTION_CLASS);
     section.setAttribute(SECTION_ATTRIBUTE, direction);
 
-    const toggleId = `${SWITCH_ID_PREFIX}${direction}`;
-    const toggleRow = createRow(doc, "switch", translate(direction), toggleId, CONTROL_CLASS);
-    const toggle = createElement<HTMLInputElement>(doc, "input", SWITCH_CLASS);
-    toggle.type = "checkbox";
-    toggle.id = toggleId;
-    toggle.setAttribute(SWITCH_ATTRIBUTE, direction);
+    const toggleRow = createRow(doc, "switch", translate(direction), CONTROL_CLASS);
+    const toggle = createSwitch(doc, direction, translate(direction));
     toggleRow.control.appendChild(toggle);
     section.appendChild(toggleRow.row);
 
-    const styleRow = createRow(doc, "style", translate("lineStyle"), "", SWATCHES_CLASS);
-    const styleSwatches = LINE_STYLES.map((style) =>
-        createStyleSwatch(doc, style, direction, lineStyleName(translate, style, direction))
-    );
+    const styleRow = createRow(doc, "style", translate("lineStyle"), SWATCHES_CLASS);
+    const styleSwatches = LINE_STYLES.map((style) => createStyleSwatch(doc, style, lineStyleName(translate, style)));
     for (const swatch of styleSwatches) {
         styleRow.control.appendChild(swatch);
     }
     section.appendChild(styleRow.row);
 
-    const colorRow = createRow(doc, "color", translate("color"), "", SWATCHES_CLASS);
+    const colorRow = createRow(doc, "color", translate("color"), SWATCHES_CLASS);
     const followSwatch = createFollowSwatch(doc, translate("followTextColor"), followTextColor);
     colorRow.control.appendChild(followSwatch);
     const colorSwatches = PRESET_COLORS.map((color) => createColorSwatch(doc, color));
@@ -382,8 +383,6 @@ const buildSection = (
 
 /** syncCustomSwatch 的附加参数 */
 interface ICustomSwatchContext {
-    /** 当前方向是否启用；关闭时临时色块同样不可点 */
-    enabled: boolean;
     /** 与面板其余控件一致的事件名 */
     eventName: string;
     /** 选中该颜色的回调 */
@@ -398,8 +397,7 @@ interface ICustomSwatchContext {
  * 这块色块是临时的：换成预设色或跟随文字色时立刻撤掉，因此色板始终是 11 个预设。
  *
  * 事件在它被造出来的那一刻就绑，而不是只绑构造期的那一批色块：只绑预设色块的话，
- * 这块长得和按钮一模一样、焦点也拿得到，点了却毫无反应。
- * enabled 决定它此刻是否可用，与同行的预设色块保持一致。
+ * 这块与其它色块长得一模一样，点了却毫无反应。它同样是不可聚焦的 div。
  */
 const syncCustomSwatch = (
     doc: Document,
@@ -410,7 +408,6 @@ const syncCustomSwatch = (
     const current = widgets.customSwatch;
     // 已经挂着当前这一块就别动：切换开关之类的操作也会走到 render，来回重建只会白白换掉 DOM 节点
     if (current !== null && current.getAttribute(COLOR_ATTRIBUTE) === color) {
-        current.disabled = !context.enabled;
         return;
     }
     if (current !== null) {
@@ -422,7 +419,6 @@ const syncCustomSwatch = (
     }
     const swatch = createColorSwatch(doc, color);
     swatch.setAttribute(CUSTOM_SWATCH_ATTRIBUTE, "");
-    swatch.disabled = !context.enabled;
     swatch.addEventListener(context.eventName, () => context.bind(swatch.getAttribute(COLOR_ATTRIBUTE)));
     markSelected(swatch, true);
     widgets.customInput.parentNode.insertBefore(swatch, widgets.customInput);
@@ -534,6 +530,11 @@ const markSelected = (element: HTMLElement, selected: boolean): void => {
     element.classList.toggle(SELECTED_CLASS, selected);
 };
 
+/** 标记开关的勾选态：aria-checked 给无障碍，外观由 index.scss 按同一个属性画出 */
+const markChecked = (element: HTMLElement, checked: boolean): void => {
+    element.setAttribute("aria-checked", checked ? "true" : "false");
+};
+
 export const createPanel = (options: IPanelOptions): IPanelController => {
     // 面板必须与锚点同属一个 document，否则量到的 rect 与写入的坐标不在同一坐标系
     const ownerDocument = options.anchor?.ownerDocument ?? document;
@@ -545,7 +546,7 @@ export const createPanel = (options: IPanelOptions): IPanelController => {
     const translate = (key: string): string => options.i18n?.[key] ?? key;
 
     // 外部传入的配置先过一遍白名单，面板内部只持有干净数据
-    let pair = sanitizePair(options.initialPair);
+    let decoration = sanitizeDecoration(options.initialDecoration);
     // 选区里的装饰不一致时先挂提示；用户改一次之后整个选区就被统一了，提示随之撤掉
     let mixed = options.mixed === true;
     let destroyed = false;
@@ -572,10 +573,10 @@ export const createPanel = (options: IPanelOptions): IPanelController => {
 
     const sections: Record<TDirection, ISectionWidgets> = {
         underline: buildSection(ownerDocument, "underline", translate, options.followTextColor ?? ""),
-        overline: buildSection(ownerDocument, "overline", translate, options.followTextColor ?? ""),
     };
-    panel.appendChild(sections.underline.section);
-    panel.appendChild(sections.overline.section);
+    for (const direction of DIRECTIONS) {
+        panel.appendChild(sections[direction].section);
+    }
 
     const actions = createElement(ownerDocument, "div", ACTIONS_CLASS);
     actions.setAttribute(ACTIONS_ATTRIBUTE, "");
@@ -617,30 +618,20 @@ export const createPanel = (options: IPanelOptions): IPanelController => {
     /** 把面板内部状态画到控件上 */
     const render = (): void => {
         mixedHint.hidden = !mixed;
+        const color = sanitizeColor(decoration.color);
         for (const direction of DIRECTIONS) {
             const widgets = sections[direction];
-            const decoration = pair[direction];
-            const color = sanitizeColor(decoration.color);
-            widgets.toggle.checked = decoration.enabled;
-            // 方向关闭时它那两行没有意义，控件禁用掉：面板默认关着上划线，
-            // 留着可点的色块的话，点第一下就替用户做了「开启这个方向」的决定
-            // （关闭态的样式与颜色一改，就等于同时打开了它）。
-            // 禁用的视觉交给思源的 b3-* 样式，这里不另造一套。
+            markChecked(widgets.toggle, decoration.enabled);
             for (const swatch of widgets.styleSwatches) {
                 markSelected(swatch, swatch.getAttribute(STYLE_ATTRIBUTE) === decoration.style);
-                swatch.disabled = !decoration.enabled;
             }
-            widgets.followSwatch.disabled = !decoration.enabled;
             markSelected(widgets.followSwatch, color === "");
             for (const swatch of widgets.colorSwatches) {
                 markSelected(swatch, swatch.getAttribute(COLOR_ATTRIBUTE) === color);
-                swatch.disabled = !decoration.enabled;
             }
-            widgets.customInput.disabled = !decoration.enabled;
             syncCustomSwatch(ownerDocument, widgets, color, {
-                enabled: decoration.enabled,
                 eventName,
-                bind: (value: string) => updateOf[direction]({color: sanitizeColor(value)}),
+                bind: (value: string) => activate({color: sanitizeColor(value), enabled: true}),
             });
             // 块上已有的自定义色既不在预设里、也不跟随文字色，取色器要跟着显示它；
             // 颜色不是 #rrggbb 时不动控件，免得把用户刚挑的颜色抹成黑色
@@ -648,58 +639,66 @@ export const createPanel = (options: IPanelOptions): IPanelController => {
                 widgets.customInput.value = color;
             }
         }
-        // 撤销栈由调用方掌管，这里只反映它给出的可用性
-        undoButton.disabled = !options.undoEnabled;
     };
 
     /**
-     * 提交一组新配置。
+     * 提交一份新配置。
      *
      * 与当前配置等价时不回调：重复点同一个色块没有任何新意图，
      * 让它走下去只会多一次装饰重排与一次保存，表现为预览抖动。
      */
-    const commit = (next: IDecorationPair): void => {
-        if (destroyed || isSamePair(next, pair)) {
+    const commit = (next: IDecoration): void => {
+        if (destroyed || isSameDecoration(next, decoration)) {
             return;
         }
-        pair = next;
+        decoration = next;
         // 这次改动会把整个选区统一成面板这一份配置，混合状态随之结束
         mixed = false;
         render();
-        options.onChange(clonePair(pair));
+        options.onChange(cloneDecoration(decoration));
     };
 
-    /** 每个方向提交「只改一个字段」的那条路径；临时色块也是走它 */
-    const updateOf = {} as Record<TDirection, (patch: Partial<IDecoration>) => void>;
+    /** 提交「只改某个字段」的那条路径；色块、开关与临时色块都走它 */
+    const update = (patch: Partial<IDecoration>): void => commit({...decoration, ...patch});
+
+    /**
+     * 一次控件激活：先提交改动，再收起面板。
+     *
+     * 顺序不能反：提交要一路走到调用方去改文档，而收面板会把这批分组与偏移一并丢掉。
+     * 与思源自己的颜色菜单一致 —— 挑完就收起，浮动工具栏与选区都留在原地，用户可以接着调。
+     */
+    const activate = (patch: Partial<IDecoration>): void => {
+        update(patch);
+        options.onClose();
+    };
 
     for (const direction of DIRECTIONS) {
         const widgets = sections[direction];
-        /** 只改该方向的某个字段，其余字段原样带过 */
-        updateOf[direction] = (patch: Partial<IDecoration>): void => {
-            // 方向关闭时线型与颜色两行都是禁用的，这里再挡一道：
-            // 即便事件被程序化派发出来，也不该凭空产生一次改动。
-            // 开关本身要能把它打开，因此只有「没有打开的意图」时才挡。
-            if (patch.enabled === undefined && !pair[direction].enabled) {
-                return;
-            }
-            const next = clonePair(pair);
-            next[direction] = {...next[direction], ...patch};
-            commit(next);
-        };
-        const update = updateOf[direction];
+        // 线型与颜色两行永远可点：方向关着的时候点它们就是把下划线打开并用上这个值，
+        // 否则这两行会变成一批点下去毫无反应的控件
         for (const swatch of widgets.styleSwatches) {
             const style = swatch.getAttribute(STYLE_ATTRIBUTE) as TLineStyle;
-            swatch.addEventListener(eventName, () => update({style}));
+            swatch.addEventListener(eventName, () => activate({style, enabled: true}));
         }
         for (const swatch of widgets.colorSwatches) {
             const color = swatch.getAttribute(COLOR_ATTRIBUTE);
-            swatch.addEventListener(eventName, () => update({color: sanitizeColor(color)}));
+            swatch.addEventListener(eventName, () => activate({color: sanitizeColor(color), enabled: true}));
         }
-        widgets.followSwatch.addEventListener(eventName, () => update({color: ""}));
-        // 开关与取色器用原生 change：移动端 touchend 早于浏览器补发的 click，
-        // 在 touchend 里读 checked 读到的还是切换前的值；change 两端一致，点击行为也由浏览器给出
-        widgets.toggle.addEventListener("change", () => update({enabled: widgets.toggle.checked}));
-        widgets.customInput.addEventListener("change", () => update({color: sanitizeColor(widgets.customInput.value)}));
+        widgets.followSwatch.addEventListener(eventName, () => activate({color: "", enabled: true}));
+        // 开关自己切换勾选状态：它不是 input，取不到原生 checkbox 的激活行为
+        widgets.toggle.addEventListener(eventName, () => activate({enabled: !decoration.enabled}));
+        /**
+         * 取色器是面板里唯一必须收场的控件。
+         *
+         * 系统取色对话框强制拿走焦点，编辑器随之清掉选区、浮动工具栏也跟着收起；
+         * 这条路径上再把选区恢复回来既多余又靠不住，因此挑完颜色先让调用方把选区与浮动工具栏
+         * 收干净，面板自己也一并收起 —— 与其余控件「保留选区、保留工具栏」的做法正好相反。
+         */
+        widgets.customInput.addEventListener("change", () => {
+            update({color: sanitizeColor(widgets.customInput.value), enabled: true});
+            options.onCustomColorPicked();
+            options.onClose();
+        });
     }
     clearButton.addEventListener(eventName, () => {
         // 清除同样把整个选区统一了，混合状态到此为止
@@ -708,9 +707,11 @@ export const createPanel = (options: IPanelOptions): IPanelController => {
             render();
         }
         options.onClear();
+        options.onClose();
     });
     undoButton.addEventListener(eventName, () => {
         options.onUndo();
+        options.onClose();
     });
 
     // 面板内的点击会冒泡到 document，靠 contains 把它们排除在「面板外」之外
@@ -734,34 +735,19 @@ export const createPanel = (options: IPanelOptions): IPanelController => {
         options.onClose();
     };
 
-    /**
-     * 吃掉面板内按下的默认行为，让编辑器的焦点留在原地。
-     *
-     * 面板上的控件全是 button 与 input，按下时浏览器默认把焦点交给被按的那个元素；
-     * 编辑器一失焦思源就清掉选区，面板记下的坐标随即失去意义，用户看到的是「点一下取消选中」。
-     *
-     * 挂在面板根上而不是逐个控件：色块、开关、取色器、两个动作按钮以及渲染时才插进来的
-     * 临时色块都在这棵子树里，一处监听就够，后加的控件也自动被罩住。
-     * 只 preventDefault，不 stopPropagation：click 照旧冒泡到 document，
-     * 「点击面板外关闭」与 Escape 两条出口的判定都不受影响。
-     */
-    const handleMouseDown = (event: Event): void => {
-        event.preventDefault();
-    };
-    panel.addEventListener(PRESS_EVENT, handleMouseDown);
     ownerDocument.addEventListener(eventName, handleOutsideEvent);
     ownerDocument.addEventListener("keydown", handleKeydown);
 
     render();
 
     return {
-        getPair: () => clonePair(pair),
-        setPair: (next: IDecorationPair, nextMixed?: boolean) => {
+        getDecoration: () => cloneDecoration(decoration),
+        setDecoration: (next: IDecoration, nextMixed?: boolean) => {
             if (destroyed) {
                 return;
             }
             // 与构造时同一条防线：外部读回的值一律先过白名单，面板内部只持有干净数据
-            pair = sanitizePair(next);
+            decoration = sanitizeDecoration(next);
             // 撤销之后各区域的装饰可能又不一样了，调用方重新判一次；没给就沿用当前状态
             if (nextMixed !== undefined) {
                 mixed = nextMixed;
@@ -776,8 +762,6 @@ export const createPanel = (options: IPanelOptions): IPanelController => {
             // 挂在 document 上的两个监听必须显式摘掉：它们不在面板子树里，不会随子树一起消失
             ownerDocument.removeEventListener(eventName, handleOutsideEvent);
             ownerDocument.removeEventListener("keydown", handleKeydown);
-            // 这一个同样显式摘掉：面板虽然已经从 DOM 移除，脱管节点上的按下不该再被它拦住
-            panel.removeEventListener(PRESS_EVENT, handleMouseDown);
             // 视口上的两个监听同理：面板销毁之后不该再被滚动与缩放带着走。
             // 摘捕获阶段的滚动监听必须带上同一个 capture 标志，否则摘不掉。
             view?.removeEventListener("resize", reposition);

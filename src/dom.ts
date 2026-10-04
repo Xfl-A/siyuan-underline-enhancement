@@ -8,7 +8,6 @@
  * 既不会把未选中的文字拖进新 span，也不会把已选的尾巴丢掉。
  */
 import {getFrontend} from "siyuan";
-import type {ISpanSpec} from "./model";
 
 /** 一个可编辑区域内的待包裹区间；start / end 是相对 editableElement.textContent 的字符偏移 */
 export interface IEditableGroup {
@@ -33,11 +32,16 @@ export interface IOffsetRange {
  */
 const DECORATION_SPAN_SELECTOR = "span[style]";
 
-/** 装饰线关键字；按整枚 token 相等比对，underline.png 之类的字样不算声明 */
+/**
+ * 装饰线关键字；按整枚 token 相等比对，underline.png 之类的字样不算声明。
+ *
+ * 上划线仍然列在这里：插件自己不再画它，但别的工具加进来的 span 带着这条声明，
+ * 认得出才剥得掉（清除装饰因此仍然能把它清干净）。
+ */
 const LINE_KEYWORDS = new Set(["underline", "overline"]);
 
-/** 一组装饰方向最多对应两个 span（外层上划线、内层下划线），读取时按这个上限截断 */
-const MAX_PAIR_SPANS = 2;
+/** 一段文字上最多读回一个装饰 span 的声明；再往后的不参与回填 */
+const MAX_DECORATION_SPANS = 1;
 
 /** 思源的零宽空格占位符 */
 const ZWSP = "\u200b";
@@ -413,10 +417,8 @@ const locate = (editableElement: HTMLElement, offset: number): {node: Text; offs
  *
  * 两端认法不同，源头是 locate 的交界规则：偏移落在两个文本节点的交界上时归前一个节点的末尾，
  * 因此端点正好压在交界上时，起止两端都会落在一个文本节点的末尾，都需要「在这个节点之后」的外扩。
- * 旧实现只给终点认了这一侧，起点只能从节点开头外扩（按 locate 的规则那只在偏移为 0 时发生），
- * 于是「从一个装饰词之后开始选中」的起点留在那块装饰最后一个文本节点的内部：
- * extractContents 把它复制成一个空壳 span，并把整块装饰连同新装饰一起吞进去 ——
- * 判相交时按字符偏移判对了，包裹时却又把它算进了范围内。
+ * 起点这一侧同样必要：它落在别的装饰或行内标记拆出的文本节点末尾时，
+ * extractContents 会把那个元素复制成一个空壳留在原地，而整块内容被算进了新装饰。
  */
 const expandBoundary = (
     editableElement: HTMLElement,
@@ -473,12 +475,18 @@ const createRangeIn = (editableElement: HTMLElement, start: number, end: number)
     return range;
 };
 
-/** 用一个 spec 圈住 range，并把范围收敛到新 span 上，供上一层包裹套住它 */
-const wrapRange = (range: Range, spec: ISpanSpec): Range => {
+/**
+ * 用一段 style 声明圈住 range，返回落在这一个新 span 上的 range。
+ * css 为 null 表示不裹任何装饰，调用方只做剥除。
+ */
+const wrapRange = (range: Range, css: string | null): Range => {
+    if (css === null) {
+        return range;
+    }
     const span = range.startContainer.ownerDocument.createElement("span");
     // 装饰身份由 style 承载：多写一个标记属性只会多出一份能过期的真相，
     // 而思源存盘时本来就会把它丢掉，落盘后的 span 反而认不回来
-    span.setAttribute("style", spec.css);
+    span.setAttribute("style", css);
     span.appendChild(range.extractContents());
     range.insertNode(span);
     range.selectNode(span);
@@ -520,16 +528,19 @@ const cleanupIn = (editableElement: HTMLElement): void => {
  * 顺序是「先剥后包」：剥 span 不改变 textContent，所以此时这些偏移仍指向同一批文字。
  * 只剥与 [start, end) 真正重叠的旧装饰，落在范围之外的保持原样 —— 同一个块里的另一处装饰是用户
  * 此前已经保存好的改动，不该被这次设置顺带抹掉。
- * specs 与 composePair 一致、外层在前，因此从末尾向前包裹，落到 DOM 上的是外层 span 包着内层 span。
- * 空 specs 的语义是清除装饰（同样只清选区内的那部分）；空区间或区域内没有文本节点时什么也不包。
+ * css 是一段 style 属性值，一个方向只对应一段，因此落盘形态是单层 span；null 的语义是清除装饰
+ * （同样只清选区内的那部分）。空区间或区域内没有文本节点时什么也不包。
  */
-export const applySpansIn = (editableElement: HTMLElement, start: number, end: number, specs: ISpanSpec[]): void => {
+export const applySpansIn = (
+    editableElement: HTMLElement,
+    start: number,
+    end: number,
+    css: string | null,
+): void => {
     stripDecorationIn(editableElement, {start, end});
-    let range = end > start ? createRangeIn(editableElement, start, end) : null;
+    const range = end > start ? createRangeIn(editableElement, start, end) : null;
     if (range !== null) {
-        for (let i = specs.length - 1; i >= 0; i--) {
-            range = wrapRange(range, specs[i]);
-        }
+        wrapRange(range, css);
     }
     cleanupIn(editableElement);
 };
@@ -612,13 +623,14 @@ export const restoreOffsets = (captured: Array<[HTMLElement, number, number]>): 
 };
 
 /**
- * 读出与 [start, end) 这段字符真正重叠的装饰 span 的 style，按文档顺序、最多两个。
+ * 读出与 [start, end) 这段字符真正重叠的装饰 span 的 style，按文档顺序、最多一个。
  *
  * 范围用区域内的字符偏移表达，与 applySpansIn 同一坐标系：只看「区域内有没有装饰」是不够的，
  * 一个块里装饰可能整个落在选区之外，那种情况下打开面板不该把它当成当前选区的样式。
  * 重叠判定与剥（stripDecorationIn）走同一个 decorationSpansIn，两条路径不可能对同一段文字
  * 给出相反的答案。
- * 两个上限对应一对方向（外层上划线、内层下划线，或合并后的单个 span）。
+ * 上限是一个 span：插件只画一条装饰线，多出来的（别的工具加的、或历史写法留下的嵌套）
+ * 以清除为准，回填只看第一个。
  */
 export const readDecorationStylesIn = (
     editableElement: HTMLElement,
@@ -629,7 +641,7 @@ export const readDecorationStylesIn = (
     const styles: string[] = [];
     for (const span of decorationSpansIn(editableElement, range)) {
         styles.push(span.getAttribute("style"));
-        if (styles.length === MAX_PAIR_SPANS) {
+        if (styles.length === MAX_DECORATION_SPANS) {
             break;
         }
     }

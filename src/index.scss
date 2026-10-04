@@ -52,6 +52,42 @@
   flex: 0 0 auto;
 }
 
+/* 方向开关。思源的 b3-switch 是给 input[type=checkbox] 写的，而面板里的开关不能是可聚焦的
+   input（按下它会把焦点带离编辑器，浮动工具栏随之收起），因此外观与勾选态都自己画：
+   勾选状态读的是 aria-checked，与其它控件的选中态走同一套属性。 */
+[data-sue-panel] .sue-switch {
+  position: relative;
+  box-sizing: border-box;
+  width: 36px;
+  height: 18px;
+  border: 1px solid var(--b3-border-color, #e0e0e0);
+  border-radius: 9px;
+  background-color: var(--b3-theme-surface-lighter, #f3f3f3);
+  cursor: pointer;
+}
+
+[data-sue-panel] .sue-switch::before {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background-color: var(--b3-theme-background, #fff);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+  transition: transform 0.15s ease;
+}
+
+[data-sue-panel] .sue-switch[aria-checked="true"] {
+  border-color: transparent;
+  background-color: var(--b3-primary-color, var(--b3-theme-color, #5b5b5b));
+}
+
+[data-sue-panel] .sue-switch[aria-checked="true"]::before {
+  transform: translateX(18px);
+}
+
 /* 控件侧统一右对齐并允许换行：色块多的时候折行，而不是把面板撑出视口 */
 [data-sue-panel] .sue-control,
 [data-sue-panel] .sue-swatches {

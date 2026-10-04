@@ -17,7 +17,6 @@ const {
     textNodesOf,
     decorationsIn,
     decorationSpans,
-    declaredLines,
     offsetIn,
 } = fixture;
 const {
@@ -32,9 +31,9 @@ const {
     offsetsWithinContent,
     getEventName,
 } = module;
-// 面板回填走的是 model 的 readPairFromStyle：装饰的 style 字符串在这里被翻译成面板那份配置。
-// 只有测试自己用到 model，src/dom.ts 仍然只 import 它的类型。
-const {readPairFromStyle} = loadModule("src/model.ts");
+// 面板回填走的是 model 的 readDecorationFromStyle：装饰的 style 字符串在这里被翻译成面板那份配置。
+// 只有测试自己用到 model，src/dom.ts 仍然不 import 它的任何东西。
+const {readDecorationFromStyle} = loadModule("src/model.ts");
 
 // 偏移三元组在 vm realm 里造出来，投影成纯数据后搬回宿主 realm 再断言，避免跨 realm 的原型差异
 const offsetsOf = (groups) => toHost(groups.map((group) => [group.start, group.end]));
@@ -44,10 +43,9 @@ const editor = (blocks) => `<div class="b3-editor" id="editor" contenteditable="
 
 const UNDERLINE_CSS = "text-decoration-line: underline; text-decoration-style: solid";
 const DOTTED_CSS = "text-decoration-line: underline; text-decoration-style: dotted; text-decoration-color: #0090ff";
+/** 别的工具加进来的上划线：插件不再生成它，但仍必须认得出、剥得掉 */
 const OVERLINE_CSS = "text-decoration-line: overline; text-decoration-style: double";
 const WAVY_CSS = "text-decoration-line: underline; text-decoration-style: wavy";
-const underlineSpec = (css = UNDERLINE_CSS) => ({position: "underline", css});
-const overlineSpec = (css = OVERLINE_CSS) => ({position: "overline", css});
 /**
  * 夹具里的一块装饰 span，形态照抄思源从 .sy 重新渲染出来的结果：只剩 data-type 与那几条声明。
  * 思源存盘时把自定义属性全丢了，因此这个夹具里没有任何标记属性，插件必须照样认出它。
@@ -388,7 +386,7 @@ test("collectEditableGroups splits a selection across a parent list item and its
     );
 
     for (const group of groups) {
-        applySpansIn(group.editableElement, group.start, group.end, [underlineSpec()]);
+        applySpansIn(group.editableElement, group.start, group.end, UNDERLINE_CSS);
     }
 
     assert.deepEqual(
@@ -412,7 +410,7 @@ test("applySpansIn decorates a list item's own text and leaves the nested sub-li
     const before = item.textContent;
 
     for (const group of collectEditableGroups(selectWithin(own, 0, 8))) {
-        applySpansIn(group.editableElement, group.start, group.end, [underlineSpec()]);
+        applySpansIn(group.editableElement, group.start, group.end, UNDERLINE_CSS);
     }
 
     // 装饰必须落在这个列表项之内、承载本项文字的那一层里
@@ -568,7 +566,7 @@ test("applySpansIn wraps the selected text in one span and leaves the adjacent t
     const cleanup = mount(editor('<p data-type="text" data-node-id="p1">abcde</p>'));
     const paragraph = document.querySelector("p");
 
-    applySpansIn(paragraph, 1, 4, [underlineSpec()]);
+    applySpansIn(paragraph, 1, 4, UNDERLINE_CSS);
 
     const decorations = decorationsIn(paragraph);
     assert.deepEqual(decorations, [{lines: "underline", style: UNDERLINE_CSS, text: "bcd"}]);
@@ -585,24 +583,19 @@ test("applySpansIn wraps the selected text in one span and leaves the adjacent t
     cleanup();
 });
 
-test("applySpansIn nests the specs outermost-first so the overline span wraps the underline span", () => {
+test("applySpansIn 只裹出一层 span，落盘形态里没有嵌套", () => {
     const cleanup = mount(editor('<p data-type="text" data-node-id="p1">abc</p>'));
     const paragraph = document.querySelector("p");
 
-    // specs 与 composePair 一致，外层在前；从末尾向前包裹才能得到下层在内、上层在外的嵌套
-    applySpansIn(paragraph, 0, 3, [overlineSpec(), underlineSpec(DOTTED_CSS)]);
+    applySpansIn(paragraph, 0, 3, DOTTED_CSS);
 
-    // 身份只能从 style 的 text-decoration-line 读出来：文档里没有别的标记可依
-    const [outer, inner] = decorationSpans(paragraph);
-    assert.equal(declaredLines(outer.getAttribute("style")), "overline");
-    assert.equal(declaredLines(inner.getAttribute("style")), "underline");
-    assert.equal(paragraph.querySelectorAll("span[style]").length, 2);
-    assert.ok(outer !== null && inner !== null);
-    assert.equal(outer.parentElement, paragraph, "上划线 span 必须在最外层");
-    assert.equal(inner.parentElement, outer, "下划线 span 必须在最内层");
-    assert.equal(outer.getAttribute("style"), OVERLINE_CSS);
-    assert.equal(inner.getAttribute("style"), DOTTED_CSS);
-    assert.equal(outer.textContent, "abc");
+    // 装饰只有一个方向，因此永远只裹一层：嵌套 span 的那条路径已经不存在
+    const spans = decorationSpans(paragraph);
+    assert.equal(paragraph.querySelectorAll("span[style]").length, 1);
+    assert.equal(spans.length, 1);
+    assert.equal(spans[0].getAttribute("style"), DOTTED_CSS);
+    assert.equal(spans[0].querySelectorAll("span[style]").length, 0, "新 span 里不得再套一层装饰");
+    assert.equal(spans[0].textContent, "abc");
     assert.equal(paragraph.textContent, "abc");
     cleanup();
 });
@@ -610,10 +603,10 @@ test("applySpansIn nests the specs outermost-first so the overline span wraps th
 test("applySpansIn removes the existing decoration when specs is empty", () => {
     const cleanup = mount(editor('<p data-type="text" data-node-id="p1">abc</p>'));
     const paragraph = document.querySelector("p");
-    applySpansIn(paragraph, 0, 3, [underlineSpec()]);
+    applySpansIn(paragraph, 0, 3, UNDERLINE_CSS);
     assert.equal(decorationsIn(paragraph).length, 1);
 
-    applySpansIn(paragraph, 0, 3, []);
+    applySpansIn(paragraph, 0, 3, null);
 
     assert.deepEqual(decorationsIn(paragraph), [], "空 specs 的语义是清除装饰");
     assert.equal(paragraph.textContent, "abc");
@@ -625,10 +618,10 @@ test("applySpansIn restyles only the selected tail when it partially overlaps an
     const cleanup = mount(editor('<p data-type="text" data-node-id="p1">abc</p>'));
     const paragraph = document.querySelector("p");
     // 先给 abc 整体加实线下划线
-    applySpansIn(paragraph, 0, 3, [underlineSpec(UNDERLINE_CSS)]);
+    applySpansIn(paragraph, 0, 3, UNDERLINE_CSS);
 
     // 用户随后只选中 bc 并换成点线蓝色
-    applySpansIn(paragraph, 1, 3, [underlineSpec(DOTTED_CSS)]);
+    applySpansIn(paragraph, 1, 3, DOTTED_CSS);
 
     assert.equal(paragraph.textContent, "abc", "换样式不能动一个字");
     assert.deepEqual(
@@ -651,7 +644,7 @@ test("applySpansIn leaves no empty text node behind when the range cuts across a
     const paragraph = document.querySelector("p");
 
     // 1..4 横跨纯文本与 <em>：<em> 整体被搬进 span，两侧的文字一字不动
-    applySpansIn(paragraph, 1, 4, [underlineSpec()]);
+    applySpansIn(paragraph, 1, 4, UNDERLINE_CSS);
 
     assert.equal(paragraph.textContent, "abcde");
     assert.deepEqual(emptyTextNodes(paragraph).length, 0, "残留空文本节点会让思源算错光标位置");
@@ -667,7 +660,7 @@ test("applySpansIn leaves no empty text node behind when the whole block is sele
     const paragraph = document.querySelector("p");
 
     // 整段选中是最常见的用法：端点外扩到段落边界后，范围搬运会在段落里留下两个空文本节点
-    applySpansIn(paragraph, 0, 3, [underlineSpec()]);
+    applySpansIn(paragraph, 0, 3, UNDERLINE_CSS);
 
     assert.equal(paragraph.textContent, "abc");
     assert.deepEqual(emptyTextNodes(paragraph).length, 0);
@@ -682,7 +675,7 @@ test("applySpansIn keeps the nesting of sibling inline elements", () => {
     const paragraph = document.querySelector("p");
 
     // 3..7 正好落在 <strong> 内部
-    applySpansIn(paragraph, 3, 7, [underlineSpec()]);
+    applySpansIn(paragraph, 3, 7, UNDERLINE_CSS);
 
     assert.equal(paragraph.textContent, "preboldmidemphpost");
     // <strong> 整体搬进 span：段里只剩一个 strong，说明没有留下被复制后空掉的残壳
@@ -712,7 +705,7 @@ test("applySpansIn wraps a single-block table cell without pulling the block int
     const groups = collectEditableGroups(selectWithin(cell, 0, 3));
     assert.equal(groups[0].editableElement, cell);
     for (const group of groups) {
-        applySpansIn(group.editableElement, group.start, group.end, [underlineSpec()]);
+        applySpansIn(group.editableElement, group.start, group.end, UNDERLINE_CSS);
     }
 
     assert.deepEqual(
@@ -741,7 +734,7 @@ test("applySpansIn does not duplicate a block id when it wraps one paragraph of 
     // 只选第一段；思源按块应用行内标记，单元格此时只是容器
     const groups = collectEditableGroups(selectWithin(first, 0, 3));
     for (const group of groups) {
-        applySpansIn(group.editableElement, group.start, group.end, [underlineSpec()]);
+        applySpansIn(group.editableElement, group.start, group.end, UNDERLINE_CSS);
     }
 
     // 单元格内的块 id 重号会让保存重载时撞车，空壳块则是块被复制后剩下的残骸
@@ -760,7 +753,7 @@ test("applySpansIn restyles the selected range and keeps decoration elsewhere in
     const paragraph = document.querySelector("p");
     const kept = savedSpan(DOTTED_CSS, "decorated");
 
-    applySpansIn(paragraph, 0, 6, [underlineSpec(WAVY_CSS)]);
+    applySpansIn(paragraph, 0, 6, WAVY_CSS);
 
     // 「给第一个词加下划线，再给同段第二个词加下划线」是最普通的用法；
     // 按区域整块剥的话，第一次加的装饰会连同它已落盘的 HTML 一起消失
@@ -789,7 +782,7 @@ test("applySpansIn keeps a decoration byte-identical when the range starts exact
     const [afterSpan, beforeSpan] = document.querySelectorAll("p");
     const kept = savedSpan(DOTTED_CSS, "decorated");
 
-    applySpansIn(afterSpan, 15, 20, [underlineSpec(WAVY_CSS)]);
+    applySpansIn(afterSpan, 15, 20, WAVY_CSS);
 
     // 选区起点与装饰末尾相接：那块装饰是用户此前保存过的另一处改动，
     // 剥掉它等于把它从文档里删掉，并随这次保存一起落盘（生产可达：装饰后紧跟的文字起选中）
@@ -805,7 +798,7 @@ test("applySpansIn keeps a decoration byte-identical when the range starts exact
 
     // 同一个边界从另一侧看：选区终点与装饰起点相接时，那块装饰落在范围之外，
     // 既不被剥掉也不被新样式盖住。（上面那条 applySpansIn 用例覆盖了这一侧，这里作对称对照）
-    applySpansIn(beforeSpan, 0, 6, [underlineSpec(WAVY_CSS)]);
+    applySpansIn(beforeSpan, 0, 6, WAVY_CSS);
 
     assert.equal(
         beforeSpan.innerHTML,
@@ -829,8 +822,8 @@ test("applySpansIn still restyles a decoration that the range only partly overla
     ));
     const [tailCut, headCut] = document.querySelectorAll("p");
 
-    applySpansIn(tailCut, 9, 20, [underlineSpec(WAVY_CSS)]);
-    applySpansIn(headCut, 0, 9, [underlineSpec(WAVY_CSS)]);
+    applySpansIn(tailCut, 9, 20, WAVY_CSS);
+    applySpansIn(headCut, 0, 9, WAVY_CSS);
 
     // 只擦掉相接处那一侧：装饰被新样式盖住，范围外的文字既不被拖进新 span、也不会被剥成裸文本
     assert.deepEqual(decorationsIn(tailCut), [{lines: "underline", style: WAVY_CSS, text: "orated tail"}]);
@@ -854,7 +847,7 @@ test("applySpansIn keeps every untouched decoration in a table cell that holds t
     const keptDelta = savedSpan(DOTTED_CSS, "delta");
 
     // 可编辑区域是 TD 本身，偏移相对 TD 的 textContent：gamma 落在 11..16
-    applySpansIn(cell, 11, 16, [underlineSpec(WAVY_CSS)]);
+    applySpansIn(cell, 11, 16, WAVY_CSS);
 
     assert.equal(
         cell.querySelector("p").innerHTML,
@@ -882,7 +875,7 @@ test("applySpansIn with empty specs clears the selected range and leaves decorat
     const paragraph = document.querySelector("p");
 
     // 「清除装饰」走的是同一条路径，因此它的作用域同样是选区而不是整块
-    applySpansIn(paragraph, 0, 5, []);
+    applySpansIn(paragraph, 0, 5, null);
 
     assert.equal(paragraph.innerHTML, `alpha tail ${savedSpan(DOTTED_CSS, "gamma")}`);
     assert.equal(paragraph.textContent, "alpha tail gamma");
@@ -897,7 +890,7 @@ test("applySpansIn strips an outer span that only partly overlaps while its inne
     ));
     const paragraph = document.querySelector("p");
 
-    applySpansIn(paragraph, 0, 2, [underlineSpec(WAVY_CSS)]);
+    applySpansIn(paragraph, 0, 2, WAVY_CSS);
 
     // 前半段换成新的下划线，后半段自己的装饰既不能丢也不能被新样式盖住
     assert.deepEqual(
@@ -920,8 +913,8 @@ test("applySpansIn leaves no empty inline clone when the range ends where an inl
     const [emphasized, linked] = document.querySelectorAll("p");
 
     // 0..3 正好停在行内元素的起点：端点若算到行内元素内部，元素会被复制成空壳留在原地
-    applySpansIn(emphasized, 0, 3, [underlineSpec()]);
-    applySpansIn(linked, 0, 3, [underlineSpec()]);
+    applySpansIn(emphasized, 0, 3, UNDERLINE_CSS);
+    applySpansIn(linked, 0, 3, UNDERLINE_CSS);
 
     assert.equal(emphasized.querySelectorAll("em").length, 1, "不能多出一个空的 <em> 副本");
     assert.equal(linked.querySelectorAll("a").length, 1, "不能多出一个空的 <a> 副本");
@@ -940,7 +933,7 @@ test("applySpansIn drops a zero-width-space placeholder left over next to real t
     assert.equal(placeholderNodes(paragraph).length, 1, "夹具必须真的放进了一个只含 ZWSP 的文本节点");
 
     // 偏移 2..3 只覆盖第二个 <em> 里的 b，落在选区之外的占位符必须被清掉
-    applySpansIn(paragraph, 2, 3, [underlineSpec()]);
+    applySpansIn(paragraph, 2, 3, UNDERLINE_CSS);
 
     assert.deepEqual(decorationsIn(paragraph), [{lines: "underline", style: UNDERLINE_CSS, text: "b"}]);
     assert.deepEqual(
@@ -956,7 +949,7 @@ test("applySpansIn keeps a zero-width-space placeholder when the whole block hol
     const cleanup = mount(editor(`<p data-type="text" data-node-id="p1">${ZWSP}</p>`));
     const paragraph = document.querySelector("p");
 
-    applySpansIn(paragraph, 0, 1, [underlineSpec()]);
+    applySpansIn(paragraph, 0, 1, UNDERLINE_CSS);
 
     // 空块唯一的占位符被抹掉之后，思源就无法在该块内放置光标
     assert.equal(paragraph.textContent, ZWSP);
@@ -970,13 +963,13 @@ test("applySpansIn does nothing for an empty or inverted offset range", () => {
     );
     const [text, blank] = document.querySelectorAll("p");
 
-    applySpansIn(text, 2, 2, [underlineSpec()]);
+    applySpansIn(text, 2, 2, UNDERLINE_CSS);
     assert.deepEqual(decorationsIn(text), [], "空范围不该留下空 span");
 
-    applySpansIn(text, 3, 1, [underlineSpec()]);
+    applySpansIn(text, 3, 1, UNDERLINE_CSS);
     assert.deepEqual(decorationsIn(text), [], "起止颠倒时不该包裹出负范围");
 
-    applySpansIn(blank, 0, 5, [underlineSpec()]);
+    applySpansIn(blank, 0, 5, UNDERLINE_CSS);
     assert.deepEqual(decorationsIn(blank), [], "块里没有文本节点时不该凭空造出 span");
     assert.equal(text.textContent, "abc");
     cleanup();
@@ -1031,10 +1024,11 @@ test("思源存盘后重新渲染的装饰没有标记属性，面板照样读�
     const styles = readDecorationStylesIn(paragraph, 0, paragraph.textContent.length);
 
     assert.deepEqual(toHost(styles), [SAVED_UNDERLINE_MARK.Properties.style]);
-    // 面板初值就是从这里读出来的：读不到的话「清除装饰」与「关掉某个方向」都会静默失效
-    assert.deepEqual(toHost(readPairFromStyle(styles[0] ?? null, styles[1] ?? null)), {
-        underline: {enabled: true, style: "wavy", color: "#0090ff"},
-        overline: {enabled: false, style: "solid", color: ""},
+    // 面板初值就是从这里读出来的：读不到的话「清除装饰」与「关掉下划线」都会静默失效
+    assert.deepEqual(toHost(readDecorationFromStyle(styles[0] ?? null)), {
+        enabled: true,
+        style: "wavy",
+        color: "#0090ff",
     });
     cleanup();
 });
@@ -1043,7 +1037,7 @@ test("没有标记属性的装饰能被换成新线型，写回去的 span 上�
     const cleanup = mount(editor(`<p data-type="text" data-node-id="p1">${SAVED_MARK_HTML}</p>`));
     const paragraph = document.querySelector("p");
 
-    applySpansIn(paragraph, 0, SAVED_UNDERLINE_MARK.TextMarkTextContent.length, [underlineSpec(DOTTED_CSS)]);
+    applySpansIn(paragraph, 0, SAVED_UNDERLINE_MARK.TextMarkTextContent.length, DOTTED_CSS);
 
     assert.deepEqual(
         decorationsIn(paragraph),
@@ -1063,7 +1057,7 @@ test("没有标记属性的装饰能被清除，剥完只剩裸文本", () => {
     const cleanup = mount(editor(`<p data-type="text" data-node-id="p1">${SAVED_MARK_HTML}</p>`));
     const paragraph = document.querySelector("p");
 
-    applySpansIn(paragraph, 0, SAVED_UNDERLINE_MARK.TextMarkTextContent.length, []);
+    applySpansIn(paragraph, 0, SAVED_UNDERLINE_MARK.TextMarkTextContent.length, null);
 
     assert.deepEqual(decorationsIn(paragraph), []);
     assert.equal(paragraph.innerHTML, SAVED_UNDERLINE_MARK.TextMarkTextContent);
@@ -1083,33 +1077,65 @@ test("简写形态 text-decoration: underline 也算装饰，能读回也能剥�
     const styles = readDecorationStylesIn(paragraph, 0, 3);
 
     assert.deepEqual(toHost(styles), ["text-decoration: underline"]);
-    assert.deepEqual(toHost(readPairFromStyle(styles[0] ?? null, styles[1] ?? null)), {
-        underline: {enabled: true, style: "solid", color: ""},
-        overline: {enabled: false, style: "solid", color: ""},
+    assert.deepEqual(toHost(readDecorationFromStyle(styles[0] ?? null)), {
+        enabled: true,
+        style: "solid",
+        color: "",
     });
 
-    applySpansIn(paragraph, 0, 3, []);
+    applySpansIn(paragraph, 0, 3, null);
 
     assert.equal(paragraph.innerHTML, "abc", "简写形态也必须剥得掉，否则清除装饰对它无效");
     cleanup();
 });
 
-test("嵌套的一对装饰都没有标记属性时，两个方向都要读得回来", () => {
-    // 外层上划线、内层下划线，正是两个方向的 style 或颜色不同时 composePair 的产出
+test("声明了上划线的 span 仍被认作装饰，因此照样能被清除", () => {
+    // 插件自己不再画上划线，但别的工具加进来的上划线必须认得出、剥得掉：
+    // 否则用户在它上面点「清除装饰」什么也不会发生，那条线就永远留在文档里
     const cleanup = mount(editor(
-        `<p data-type="text" data-node-id="p1"><span data-type="text" style="${OVERLINE_CSS}">ab` +
-            `<span data-type="text" style="${DOTTED_CSS}">cd</span></span></p>`,
+        `<p data-type="text" data-node-id="p1">plain ${savedSpan(OVERLINE_CSS, "decorated")} tail</p>`,
     ));
     const paragraph = document.querySelector("p");
 
-    const styles = readDecorationStylesIn(paragraph, 0, 4);
-
-    // 文档顺序即外层在前，与 composePair 的返回顺序一致
-    assert.deepEqual(toHost(styles), [OVERLINE_CSS, DOTTED_CSS]);
-    assert.deepEqual(toHost(readPairFromStyle(styles[0] ?? null, styles[1] ?? null)), {
-        underline: {enabled: true, style: "dotted", color: "#0090ff"},
-        overline: {enabled: true, style: "double", color: ""},
+    // 读回：它是一段装饰声明，面板据此报「下划线未启用」而线型与颜色照读
+    const styles = readDecorationStylesIn(paragraph, 0, 20);
+    assert.deepEqual(toHost(styles), [OVERLINE_CSS], "上划线声明同样算装饰");
+    assert.deepEqual(toHost(readDecorationFromStyle(styles[0] ?? null)), {
+        enabled: false,
+        style: "double",
+        color: "",
     });
+
+    // 剥：单独剥与随清除装饰一起剥，两条路都要脱掉它
+    stripDecorationIn(paragraph);
+    assert.deepEqual(decorationsIn(paragraph), []);
+    assert.equal(paragraph.innerHTML, "plain decorated tail", "剥完只剩裸文本");
+
+    const stillThere = mount(editor(
+        `<p data-type="text" data-node-id="p1">plain ${savedSpan(OVERLINE_CSS, "decorated")} tail</p>`,
+    ));
+    const target = document.querySelector("p");
+    applySpansIn(target, 0, 20, null);
+    assert.deepEqual(decorationsIn(target), [], "清除装饰同样要能清掉上划线");
+    assert.equal(target.innerHTML, "plain decorated tail");
+    stillThere();
+    cleanup();
+});
+
+test("一段文字上最多读回一个装饰 span 的声明", () => {
+    // 上限是一个：插件只画一条装饰线，嵌套写法里多出来的那几条以清除为准。
+    // 嵌套的两个 span 占的字符区间完全相同，因此文档顺序里的第一个（外层）就是唯一被回填的那一个
+    const cleanup = mount(editor(
+        `<p data-type="text" data-node-id="p1"><span data-type="text" style="${OVERLINE_CSS}">ab` +
+            `<span data-type="text" style="${DOTTED_CSS}">cd</span></span>` +
+            `${savedSpan(UNDERLINE_CSS, "ef")}</p>`,
+    ));
+    const paragraph = document.querySelector("p");
+    assert.equal(decorationsIn(paragraph).length, 3, "夹具前提：这一段上共有三处装饰声明");
+
+    assert.deepEqual(toHost(readDecorationStylesIn(paragraph, 0, 6)), [OVERLINE_CSS]);
+    // 范围只落在第三个 span 上时，回填的就是它自己
+    assert.deepEqual(toHost(readDecorationStylesIn(paragraph, 4, 6)), [UNDERLINE_CSS]);
     cleanup();
 });
 
@@ -1120,7 +1146,7 @@ test("清除时嵌套的两层装饰都被脱掉", () => {
     ));
     const paragraph = document.querySelector("p");
 
-    applySpansIn(paragraph, 0, 4, []);
+    applySpansIn(paragraph, 0, 4, null);
 
     assert.deepEqual(decorationsIn(paragraph), [], "两层都要脱掉");
     assert.equal(paragraph.innerHTML, "abcd");
@@ -1201,7 +1227,7 @@ test("reclaimEditableElement finds the same inner area again after the block HTM
     const own = item.querySelector("p");
     const before = item.outerHTML;
     const groups = collectEditableGroups(selectWithin(own, 0, 8));
-    applySpansIn(groups[0].editableElement, groups[0].start, groups[0].end, [underlineSpec()]);
+    applySpansIn(groups[0].editableElement, groups[0].start, groups[0].end, UNDERLINE_CSS);
 
     // 模拟 persist.undoLastChange：整块 HTML 换回去，块连同子树一起被换掉
     item.outerHTML = before;
@@ -1216,8 +1242,8 @@ test("reclaimEditableElement finds the same inner area again after the block HTM
 
     // 认领之后再改一次设置：装饰照旧落在本项文字上，子列表里的装饰也不该被顺手剥掉
     const child = document.querySelector('[data-node-id="B"]');
-    applySpansIn(child, 0, 10, [underlineSpec(DOTTED_CSS)]);
-    applySpansIn(reclaimed, 0, 8, [underlineSpec(DOTTED_CSS)]);
+    applySpansIn(child, 0, 10, DOTTED_CSS);
+    applySpansIn(reclaimed, 0, 8, DOTTED_CSS);
 
     assert.deepEqual(decorationsIn(reclaimed), [{lines: "underline", style: DOTTED_CSS, text: "own text"}]);
     assert.deepEqual(
@@ -1250,8 +1276,8 @@ test("captureOffsets and restoreOffsets return the selection to the same text af
     assert.deepEqual(toHost(captured.map(([, start, end]) => [start, end])), [[1, 5], [0, 3]]);
 
     // 模拟面板应用：块 DOM 已被装饰 span 重排，原来的 Range 早已失效
-    applySpansIn(first, 1, 5, [underlineSpec()]);
-    applySpansIn(second, 0, 3, [overlineSpec()]);
+    applySpansIn(first, 1, 5, UNDERLINE_CSS);
+    applySpansIn(second, 0, 3, OVERLINE_CSS);
 
     restoreOffsets(captured);
 

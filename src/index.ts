@@ -27,13 +27,13 @@ import {
 import type {IEditableGroup} from "./dom";
 import {UNDERLINE_ICON_SVG} from "./icons";
 import {
-    DEFAULT_PAIR,
-    composePair,
-    isSamePair,
-    readPairFromStyle,
-    sanitizePair,
+    DEFAULT_DECORATION,
+    composeDecoration,
+    isSameDecoration,
+    readDecorationFromStyle,
+    sanitizeDecoration,
 } from "./model";
-import type {IDecorationPair} from "./model";
+import type {IDecoration} from "./model";
 import {createPanel} from "./panel";
 import type {
     IPanelController,
@@ -43,7 +43,6 @@ import {
     clearChanges,
     createDebouncedSaver,
     findBlockElement,
-    hasUndoableChange,
     recordChange,
     undoLastChange,
 } from "./persist";
@@ -68,29 +67,23 @@ const SETTINGS_FILE = "settings.json";
 const NODE_ID_ATTRIBUTE = "data-node-id";
 
 /**
- * 两个方向都关闭的一组配置。
+ * 下划线关闭的一份配置。
  * 既是「清除装饰」的入参，也是「选区里没有装饰」的判据：
- * readPairFromStyle 对着没有装饰的区域会给出两个方向都关闭的结果。
+ * readDecorationFromStyle 对着没有装饰的区域会给出关闭的结果。
  */
-const CLEARED_PAIR: IDecorationPair = {
-    underline: {...DEFAULT_PAIR.underline, enabled: false},
-    overline: {...DEFAULT_PAIR.overline, enabled: false},
-};
+const CLEARED_DECORATION: IDecoration = {...DEFAULT_DECORATION, enabled: false};
 
 export default class UnderlineEnhancement extends Plugin {
     /** 当前面板；null 表示没有打开的面板 */
     private panel: IPanelController = null;
-    /**
-     * 传给面板的实参对象。面板每次重画都重读它上面的 undoEnabled，
-     * 因此撤销可用性只能靠就地改这个对象来告诉面板，面板本身并不持有撤销栈。
-     */
+    /** 传给面板的实参对象；撤销栈只有本类掌握，面板不据此禁用撤销 */
     private panelOptions: IPanelOptions = null;
     /** 打开面板时的选区分组；面板开着期间的每次改动都落到它上面 */
     private groups: IEditableGroup[] = [];
     /** 打开面板时记下的字符偏移；包裹装饰会让原 Range 失效，只能靠它重建选区 */
     private offsets: Array<[HTMLElement, number, number]> = [];
-    /** 刚应用到文档上的那一组配置，关闭面板时据此记住上次的用法 */
-    private appliedPair: IDecorationPair = null;
+    /** 刚应用到文档上的那一份配置，关闭面板时据此记住上次的用法 */
+    private appliedDecoration: IDecoration = null;
     /** 防抖保存器：所有块共用一个窗口 */
     private saver: IDebouncedSaver = null;
     /** 打开面板时挂着的浮动工具栏，关闭时要把 subElementCloseCB 还回去 */
@@ -98,7 +91,7 @@ export default class UnderlineEnhancement extends Plugin {
     /** 思源原有的关闭回调；插件的回调不能留在思源的对象上 */
     private previousSubElementCloseCB: () => void = null;
     /** 记住的上次配置，选区里没有装饰时作为面板初值 */
-    private rememberedPair: IDecorationPair = null;
+    private rememberedDecoration: IDecoration = null;
     /** 撤销进行中；重复触发会与前一次抢同一个栈顶 */
     private undoing = false;
 
@@ -133,7 +126,7 @@ export default class UnderlineEnhancement extends Plugin {
     async onLayoutReady() {
         try {
             // 读回的是磁盘上的外部数据，必须过白名单才能进面板，也才能再写回文档
-            this.rememberedPair = sanitizePair(await this.loadData(SETTINGS_FILE));
+            this.rememberedDecoration = sanitizeDecoration(await this.loadData(SETTINGS_FILE));
         } catch (error) {
             // 读不到只影响「上次用过什么」：初值退回默认值，其余功能不受影响
             console.log(`[${this.name}] load data [${SETTINGS_FILE}] fail: `, error);
@@ -154,6 +147,10 @@ export default class UnderlineEnhancement extends Plugin {
      *
      * IMenuItem.click 收到的是 Protyle 类实例（思源的 ToolbarItem 传的是 protyle.getInstance()），
      * 浮动工具栏挂在它的 .protyle 上；click 也拿不到触发按钮本身，面板因此只拿工具栏容器当定位参照。
+     *
+     * 面板与浮动工具栏是各自独立的：这里接管的 subElementCloseCB 只负责「工具栏收起 → 收面板」，
+     * 面板自己收起时走的是另一条出口（closePanel），那条路只把回调还回去，不动工具栏。
+     * 因此点面板里的控件不会把浮动工具栏带走。
      */
     private openPanel(protyle: Protyle): void {
         const toolbar = protyle?.protyle?.toolbar;
@@ -167,7 +164,7 @@ export default class UnderlineEnhancement extends Plugin {
         }
         this.groups = groups;
         this.offsets = captureOffsets(toolbar.range);
-        this.appliedPair = null;
+        this.appliedDecoration = null;
         this.undoing = false;
         this.toolbar = toolbar;
         this.previousSubElementCloseCB = toolbar.subElementCloseCB;
@@ -175,40 +172,42 @@ export default class UnderlineEnhancement extends Plugin {
         toolbar.subElementCloseCB = () => {
             this.closePanel();
         };
-        const current = this.readCurrentPair();
+        const current = this.readCurrentDecoration();
         // 「跟随文字色」色块上的字母要显出装饰真正会取到的那个颜色，值只能从选中的文字上读；
         // 跨多个区域时取第一组：这一项的效果本来就只能给出一个颜色
         const followTextColor = readFirstTextColor(this.groups[0].editableElement);
         this.panelOptions = {
             anchor: toolbar.element,
-            initialPair: current.pair,
+            initialDecoration: current.decoration,
             i18n: this.i18n as Record<string, string>,
-            undoEnabled: hasUndoableChange(),
             followTextColor,
             // 选区里各区域的装饰不一致：面板要先说明再让用户点，
             // 否则第一下点击就会把没打算动的区域一并改写
             mixed: current.mixed,
-            onChange: (pair: IDecorationPair) => this.applyPair(pair),
-            // 清除装饰就是提交一组两个方向都关闭的配置
-            onClear: () => this.applyPair(CLEARED_PAIR),
+            onChange: (decoration: IDecoration) => this.applyDecoration(decoration),
+            // 清除装饰就是提交一份下划线关闭的配置
+            onClear: () => this.applyDecoration(CLEARED_DECORATION),
             onUndo: () => {
                 void this.undoDecoration();
             },
+            // 面板只收自己：浮动工具栏与选区都留给用户继续用
             onClose: () => this.closePanel(),
+            // 原生取色器那条路径反过来：选区与浮动工具栏一起收掉
+            onCustomColorPicked: () => this.discardSelectionAndToolbar(),
         };
         this.panel = createPanel(this.panelOptions);
     }
 
     /**
-     * 把一组配置落到选区上：按内存中的分组重裹装饰，改完重建选区，最后按块调度保存。
+     * 把一份配置落到选区上：按内存中的分组重裹装饰，改完重建选区，最后按块调度保存。
      *
-     * 分组是打开面板时记下的：面板在自己的范围内吃掉了按下的默认行为，编辑器不失焦，
+     * 分组是打开面板时记下的：面板上的控件都不可聚焦，编辑器不失焦，
      * 但重裹装饰之后原 Range 依然失效，可靠的坐标只有这里记下的字符偏移。
      *
      * 一个分组动到几个块就记几条块记录，但它们合起来只占撤销栈里的一条：用户做的是一次操作，
      * 按一次撤销就该整体退回，而不是只退回最后一个块。
      */
-    private applyPair(pair: IDecorationPair): void {
+    private applyDecoration(decoration: IDecoration): void {
         // 思源随时会重渲染块，面板开着期间记下的引用随时可能脱管：每次应用都先重新认领，
         // 读块 HTML、包裹装饰与重建选区才都落在文档里那个节点上
         if (!this.claimBlocks() || !this.offsetsWithinContent()) {
@@ -217,12 +216,13 @@ export default class UnderlineEnhancement extends Plugin {
             showMessage(this.i18n.selectionChanged as string);
             return;
         }
-        const specs = composePair(sanitizePair(pair));
+        // 下划线关闭时没有装饰要裹：那个 null 的语义是「只剥掉选区里的旧装饰」
+        const css = composeDecoration(sanitizeDecoration(decoration));
         const changed: IBlockChange[] = [];
         for (const group of this.groups) {
             const blockElement = group.blockElement;
             const beforeHTML = blockElement.outerHTML;
-            applySpansIn(group.editableElement, group.start, group.end, specs);
+            applySpansIn(group.editableElement, group.start, group.end, css);
             const afterHTML = blockElement.outerHTML;
             const blockId = blockElement.getAttribute(NODE_ID_ATTRIBUTE);
             // 改动前与改后完全相同（选区里本来就没有装饰，或清了个空）时既不记也不发请求；
@@ -239,8 +239,8 @@ export default class UnderlineEnhancement extends Plugin {
         recordChange(changed);
         // 重建选区，用户可以接着输入，面板的下一次改动也还有坐标可用
         restoreOffsets(this.offsets);
-        this.appliedPair = sanitizePair(pair);
-        this.syncPanel(this.appliedPair);
+        this.appliedDecoration = sanitizeDecoration(decoration);
+        this.syncPanel(this.appliedDecoration);
     }
 
     /** 撤销：先把改动前的块 HTML 写回文档，再按文档里的真实状态刷新面板 */
@@ -256,8 +256,8 @@ export default class UnderlineEnhancement extends Plugin {
             }
             // 撤销已经把改动写回内核，面板接下来只做回读：认不回来也没有东西要再写一次
             this.claimBlocks();
-            const current = this.readCurrentPair();
-            this.syncPanel(current.pair, current.mixed);
+            const current = this.readCurrentDecoration();
+            this.syncPanel(current.decoration, current.mixed);
         } finally {
             this.undoing = false;
         }
@@ -322,59 +322,77 @@ export default class UnderlineEnhancement extends Plugin {
      * 每个分组各自读一遍选区内的装饰，不能只看第一个：跨块选区里只有第二块被装饰过时，
      * 拿着默认值开场会让用户第一下点击就把第二块的装饰改掉，而且看上去完全正常。
      *
-     * 方向不靠 span 的嵌套位置判断，而是从各自的 text-decoration-line 读：
-     * 嵌套时外层是上划线、内层是下划线；两个方向设置相同时思源会存成单个
-     * text-decoration-line: underline overline 的节点，同时供给两个方向。
      * 装饰只在选区范围内找：块里落在选区之外的装饰不描述当前这次选择。
      *
      * 各分组一致时就用那一份；不一致时取第一份有装饰的，并如实报出「混合」，
      * 由面板先把这件事说清楚 —— 一次改动会把整个选区统一，用户该在点之前就知道。
      * 全都没有装饰时回到上次用过的配置，没有记录就用默认值。
      */
-    private readCurrentPair(): {pair: IDecorationPair; mixed: boolean;} {
-        const pairs = this.groups.map((group) => {
+    private readCurrentDecoration(): {decoration: IDecoration; mixed: boolean;} {
+        const decorations = this.groups.map((group) => {
             const styles = readDecorationStylesIn(group.editableElement, group.start, group.end);
-            return readPairFromStyle(styles[0] ?? null, styles[1] ?? null);
+            return readDecorationFromStyle(styles[0] ?? null);
         });
-        const decorated = pairs.filter((pair) => pair.underline.enabled || pair.overline.enabled);
+        const decorated = decorations.filter((item) => item.enabled);
         if (decorated.length === 0) {
-            return {pair: this.rememberedPair ?? DEFAULT_PAIR, mixed: false};
+            return {decoration: this.rememberedDecoration ?? DEFAULT_DECORATION, mixed: false};
         }
         const first = decorated[0];
-        const mixed = pairs.some((pair) => !isSamePair(pair, first));
-        return {pair: first, mixed};
+        const mixed = decorations.some((item) => !isSameDecoration(item, first));
+        return {decoration: first, mixed};
     }
 
     /**
      * 把文档里的真实状态刷回面板。
      *
-     * 清除与撤销都直接改文档，面板自己看不到结果（setPair 也不会触发 onChange，否则会再来一轮改动）。
-     * undoEnabled 就地改面板持有的实参对象，面板重画时重读它。
+     * 清除与撤销都直接改文档，面板自己看不到结果（setDecoration 也不会触发 onChange，
+     * 否则会再来一轮改动）。撤销栈是否存在只由调用方掌握，面板不据此禁用撤销：
+     * 一个按了没反应的按钮比按了没效果更难懂，栈空时它仍然什么都不做。
      */
-    private syncPanel(pair: IDecorationPair, mixed = false): void {
+    private syncPanel(decoration: IDecoration, mixed = false): void {
         if (this.panelOptions === null) {
             return;
         }
-        this.panelOptions.undoEnabled = hasUndoableChange();
-        this.panel.setPair(pair, mixed);
+        this.panel.setDecoration(decoration, mixed);
     }
 
-    /** 关闭面板；可重复调用，也可以发生在面板从未打开过的情况下 */
+    /**
+     * 原生取色器那条路径：清掉选区，并收起浮动工具栏。
+     *
+     * 系统取色对话框强制拿走焦点，编辑器失焦后思源已经清掉了选区、浮动工具栏也已经在收起途中，
+     * 再把选区恢复回来既多余又靠不住。这里主动做一次干净的收尾：选区清空，
+     * 浮动工具栏则按它在思源里的收起方式来触发 —— 把一次按下派发到面板与工具栏之外的元素上，
+     * 思源照例收起浮动工具栏，并顺带调用插件自己的关闭回调。
+     */
+    private discardSelectionAndToolbar(): void {
+        const doc = this.groups[0]?.editableElement?.ownerDocument ?? document;
+        doc.getSelection?.()?.removeAllRanges();
+        const view = doc.defaultView ?? window;
+        doc.body?.dispatchEvent(new view.MouseEvent("mousedown", {bubbles: true, cancelable: true}));
+    }
+
+    /**
+     * 关闭面板；可重复调用，也可以发生在面板从未打开过的情况下。
+     *
+     * 这条路只收面板自己：浮动工具栏不归它管，把 subElementCloseCB 还回去就收工，
+     * 用户可以接着用工具栏改下一次选择。工具栏那边收起时走的是 openPanel 里接管的回调。
+     */
     private closePanel(): void {
         if (this.panel !== null) {
             // 面板开着就意味着有未到点的保存，离开前必须发出去
             this.saver?.flush();
-            if (this.appliedPair !== null) {
-                this.savePair(this.appliedPair);
+            if (this.appliedDecoration !== null) {
+                this.saveDecoration(this.appliedDecoration);
             }
             this.panel.destroy();
             this.panel = null;
             this.panelOptions = null;
             this.groups = [];
             this.offsets = [];
-            this.appliedPair = null;
-            // 撤销栈只对当前这一次面板会话有意义（设计稿 §7.2）
-            clearChanges();
+            this.appliedDecoration = null;
+            // 撤销栈不在这里清：面板收在每一次控件激活之后，一次会话已经短到装不下任何一次改动，
+            // 在这里清空等于撤销永远按不动。切换文档与卸载仍然照旧清空（见上），
+            // 而撤销前的过期校验会保证记错的记录被丢掉而不是改坏文档。
         }
         if (this.toolbar !== null) {
             this.toolbar.subElementCloseCB = this.previousSubElementCloseCB;
@@ -384,9 +402,9 @@ export default class UnderlineEnhancement extends Plugin {
     }
 
     /** 记住上次用过的配置；写盘失败只影响下次打开面板的初值，不值得打断用户 */
-    private savePair(pair: IDecorationPair): void {
-        this.rememberedPair = pair;
-        this.saveData(SETTINGS_FILE, pair).catch((error: unknown) => {
+    private saveDecoration(decoration: IDecoration): void {
+        this.rememberedDecoration = decoration;
+        this.saveData(SETTINGS_FILE, decoration).catch((error: unknown) => {
             console.log(`[${this.name}] save data [${SETTINGS_FILE}] fail: `, error);
         });
     }
