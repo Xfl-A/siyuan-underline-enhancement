@@ -33,14 +33,14 @@
 | 实际结果 | （待填）                                                     |
 | 结论     | ☐ 通过　☐ 不通过                                             |
 
-## 2. 应用下划线与上划线
+## 2. 应用下划线
 
-| 项       | 内容                                                                                                                                                                                                           |
-| -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 步骤     | 保持选区 → 点击图标打开面板 → **确认「下划线」开关已开启**（默认就是开的）→ 选一个线型与颜色 → 打开「上划线」开关并另选线型与颜色                                                                              |
-| 预期结果 | ① 面板打开时「下划线」开关已勾选，「上划线」开关未勾选（规格 §4 的默认值）；② 「上划线」的两行（线型、颜色）在它关着时是禁用状态；③ 选中的文字在编辑器里立即出现两条独立可配的线，线型与颜色与面板设置逐项一致 |
-| 实际结果 | （待填）                                                                                                                                                                                                       |
-| 结论     | ☐ 通过　☐ 不通过                                                                                                                                                                                               |
+| 项       | 内容                                                                                                                                                                                                                 |
+| -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 步骤     | 保持选区 → 点击图标打开面板 → 选一个线型 → 再选一个颜色                                                                                                                                                              |
+| 预期结果 | ① 面板打开时「下划线」开关已勾选；② 线型与颜色两行的控件**始终可点**，没有需要先启用才能操作的部分；③ 选中的文字立即出现下划线，线型与颜色与面板设置逐项一致；④ 改线型或颜色时**面板不关闭**，选中与浮动工具栏都还在 |
+| 实际结果 | （待填）                                                                                                                                                                                                             |
+| 结论     | ☐ 通过　☐ 不通过                                                                                                                                                                                                     |
 
 > ⚠️ 「下划线」开关默认**已开启**。按字面「打开开关」去点它反而会把下划线关掉，那样本项的预期结果永远不成立。
 > 同样地，关着的方向那一行的线型与颜色色块是禁用的：点它不会改设置，要先打开该方向的开关。
@@ -81,11 +81,11 @@
    }
    ```
 
-   两个方向设置不同时会出现两个嵌套的 `NodeTextMark`（外层 `overline`、内层 `underline`）；
-   相同时只有一个，`text-decoration-line` 为 `underline overline`。
+   插件只产出下划线，因此始终只有一个 `NodeTextMark`，`text-decoration-line` 为 `underline`。
 5. 逐项核对：
    * `Properties.style` 里的 `text-decoration-*` 声明与面板上的设置**逐字一致**（包括颜色值与 `var(--b3-...)` 主题变量）。
-   * 「跟随文字颜色」时**没有** `text-decoration-color` 声明（由 CSS 的 `currentColor` 生效）—— 出现即为错。
+   * 「跟随文字颜色」时 `text-decoration-color` 的值是字面量 `currentColor` —— 整条声明必须存在。
+     省略它虽然渲染等价，但思源会因此把颜色补成一条 `color:` 声明（那是文字色，不是装饰色），装饰颜色就失效了。
    * 装饰**只由 style 承载**：识别与清除完全依赖 `text-decoration-line`，不依赖任何自定义标记属性。
      这不是风格偏好 —— 思源解析块 HTML 时会丢掉自定义属性，只把 style 原样存进 AST，
      靠自定义属性识别装饰的插件在落盘后就再也认不出自己的装饰。
@@ -94,21 +94,21 @@
 
 ## 4. 刷新与重开文档
 
-| 项       | 内容                                                                                |
-| -------- | ----------------------------------------------------------------------------------- |
-| 步骤     | 装饰完成后刷新浏览器页面（或重开思源），再重新打开测试文档                          |
-| 预期结果 | 装饰保持不变；面板重新打开时回填出上次的选择（下划线/上划线各自的开关、线型、颜色） |
-| 实际结果 | （待填）                                                                            |
-| 结论     | ☐ 通过　☐ 不通过                                                                    |
+| 项       | 内容                                                       |
+| -------- | ---------------------------------------------------------- |
+| 步骤     | 装饰完成后刷新浏览器页面（或重开思源），再重新打开测试文档 |
+| 预期结果 | 装饰保持不变；面板重新打开时回填出上次的开关、线型与颜色   |
+| 实际结果 | （待填）                                                   |
+| 结论     | ☐ 通过　☐ 不通过                                           |
 
-## 5. 两个方向异配置
+## 5. 反复改设置不留残留
 
-| 项       | 内容                                                                                     |
-| -------- | ---------------------------------------------------------------------------------------- |
-| 步骤     | 选中一段文字 → 下划线设 `dashed` + 红色 → 上划线设 `wavy` + 蓝色                         |
-| 预期结果 | 两条线各自的线型与颜色都正确，不互相串扰；反复改设置不会出现样式残留（旧装饰被整体替换） |
-| 实际结果 | （待填）                                                                                 |
-| 结论     | ☐ 通过　☐ 不通过                                                                         |
+| 项       | 内容                                                                                   |
+| -------- | -------------------------------------------------------------------------------------- |
+| 步骤     | 选中一段文字 → 依次设为 `wavy` + 红 → `dotted` + 蓝 → `solid` + 跟随文字色             |
+| 预期结果 | 每次都只有一条下划线，线型与颜色与面板一致；反复改不会出现样式残留（旧装饰被整体替换） |
+| 实际结果 | （待填）                                                                               |
+| 结论     | ☐ 通过　☐ 不通过                                                                       |
 
 ## 6. 跨区域应用
 
@@ -144,12 +144,12 @@
 
 ## 9. 导出降级（需真实实例）
 
-| 项       | 内容                                                                                                                                         |
-| -------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| 步骤     | 装饰一段文字后，分别导出 Markdown、HTML、PDF，打开导出结果查看该段                                                                           |
-| 预期结果 | **与规格 §9.1 一致**：下划线降级为普通 `<u>`，上划线、线型、颜色全部丢失。这是思源导出管线的既定行为，不是缺陷；本项只确认实际表现与文档一致 |
-| 实际结果 | （待填）                                                                                                                                     |
-| 结论     | ☐ 通过　☐ 不通过　说明差异：                                                                                                                 |
+| 项       | 内容                                                                                                                                 |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| 步骤     | 装饰一段文字后，分别导出 Markdown、HTML、PDF，打开导出结果查看该段                                                                   |
+| 预期结果 | **与规格 §9.1 一致**：下划线降级为普通 `<u>`，线型与颜色全部丢失。这是思源导出管线的既定行为，不是缺陷；本项只确认实际表现与文档一致 |
+| 实际结果 | （待填）                                                                                                                             |
+| 结论     | ☐ 通过　☐ 不通过　说明差异：                                                                                                         |
 
 > 本项无法静态确认：降级发生在思源的导出管线里，与本插件无关。必须实测，并把实际导出结果与 README
 > 「已知限制」第 1 条逐字对照；若实际表现比预期**更好**（比如保住了颜色），请更新文档，而不是保留这句已经过时的限制。
@@ -250,7 +250,7 @@
 | 序号 | 验证项                                         | 结论 | 备注 |
 | ---- | ---------------------------------------------- | ---- | ---- |
 | 1    | 浮动工具栏出现图标                             |      |      |
-| 2    | 应用下划线与上划线（含默认状态断言）           |      |      |
+| 2    | 应用下划线（含默认状态与「面板不关闭」断言）   |      |      |
 | 3    | `.sy` 里 `style` 原样落盘                      |      |      |
 | 4    | 刷新与重开文档                                 |      |      |
 | 5    | 两个方向异配置                                 |      |      |
@@ -278,23 +278,23 @@ The tables above are the authoritative ones; this section is the same list in En
 [English README](../README.md) audience has a path to it. Record results in the Chinese tables above
 (or copy the rows into your own report) — the item numbers match one-to-one.
 
-| #  | Check                                                                       | Expected                                                                                                                                                                    |
-| -- | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1  | Icon appears in the floating toolbar                                        | The **Underline Enhancement** icon shows up, with the same tooltip                                                                                                          |
-| 2  | Apply underline and overline                                                | The underline switch starts **on** and the overline switch starts **off**; the overline rows are disabled while it is off; both lines render with their own style and color |
-| 3  | `style` lands verbatim in the `.sy` file (key evidence)                     | The block's `content` keeps all three `text-decoration-*` declarations byte-for-byte; no `text-decoration-color` when following the text color                              |
-| 4  | Reload and reopen the document                                              | Decoration survives; reopening the panel restores the last configuration                                                                                                    |
-| 5  | Two directions with different styles                                        | Each line keeps its own style and color; repeated edits leave no residue                                                                                                    |
-| 6  | Apply across regions                                                        | Each editable region is wrapped on its own, no duplicated or empty blocks, every block saved separately                                                                     |
-| 7  | Document history can roll back                                              | Document history removes the decoration and leaves the rest of the text alone                                                                                               |
-| 8  | Sync to another device                                                      | Decoration survives                                                                                                                                                         |
-| 9  | Export degradation (real instance required)                                 | Markdown / HTML / PDF collapse the underline to `<u>`; overline, style and color are lost — SiYuan's behaviour                                                              |
-| 10 | Published page (real instance required)                                     | Decoration renders; the toolbar icon is absent because the plugin skips read-only and publish mode                                                                          |
-| 11 | Read-only mode (real instance required)                                     | Decoration renders and no toolbar icon appears                                                                                                                              |
-| 12 | Mobile panel layout and touch                                               | Panel stays inside the viewport and scrolls if needed; touch targets are at least 32px; switches toggle                                                                     |
-| 13 | Undo after the kernel re-rendered and normalised the block HTML (no reload) | Undo removes the decoration. Byte-exact staleness checking cannot be covered by automated tests                                                                             |
-| 14 | Undo after editing the same block again                                     | The stale entry is skipped; the newly typed text is never overwritten                                                                                                       |
-| 15 | Sub-range edit in a block that has decoration elsewhere                     | Only the selected range is restyled or cleared; the other decoration is preserved byte-for-byte                                                                             |
-| 16 | Panel is not occluded by the floating toolbar                               | Every control, including **Clear decoration** and **Undo**, stays visible and clickable                                                                                     |
+| #  | Check                                                                       | Expected                                                                                                                                                                                |
+| -- | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1  | Icon appears in the floating toolbar                                        | The **Underline Enhancement** icon shows up, with the same tooltip                                                                                                                      |
+| 2  | Apply the underline (defaults + panel stays open)                           | The underline switch starts **on**; every control is clickable; the line style and color apply immediately; changing them leaves the panel, the selection and the floating toolbar open |
+| 3  | `style` lands verbatim in the `.sy` file (key evidence)                     | The block's `content` keeps all three `text-decoration-*` declarations byte-for-byte; no `text-decoration-color` when following the text color                                          |
+| 4  | Reload and reopen the document                                              | Decoration survives; reopening the panel restores the last configuration                                                                                                                |
+| 5  | Two directions with different styles                                        | Each line keeps its own style and color; repeated edits leave no residue                                                                                                                |
+| 6  | Apply across regions                                                        | Each editable region is wrapped on its own, no duplicated or empty blocks, every block saved separately                                                                                 |
+| 7  | Document history can roll back                                              | Document history removes the decoration and leaves the rest of the text alone                                                                                                           |
+| 8  | Sync to another device                                                      | Decoration survives                                                                                                                                                                     |
+| 9  | Export degradation (real instance required)                                 | Markdown / HTML / PDF collapse the underline to `<u>`; style and color are lost — SiYuan's behaviour                                                                                    |
+| 10 | Published page (real instance required)                                     | Decoration renders; the toolbar icon is absent because the plugin skips read-only and publish mode                                                                                      |
+| 11 | Read-only mode (real instance required)                                     | Decoration renders and no toolbar icon appears                                                                                                                                          |
+| 12 | Mobile panel layout and touch                                               | Panel stays inside the viewport and scrolls if needed; touch targets are at least 32px; switches toggle                                                                                 |
+| 13 | Undo after the kernel re-rendered and normalised the block HTML (no reload) | Undo removes the decoration. Byte-exact staleness checking cannot be covered by automated tests                                                                                         |
+| 14 | Undo after editing the same block again                                     | The stale entry is skipped; the newly typed text is never overwritten                                                                                                                   |
+| 15 | Sub-range edit in a block that has decoration elsewhere                     | Only the selected range is restyled or cleared; the other decoration is preserved byte-for-byte                                                                                         |
+| 16 | Panel is not occluded by the floating toolbar                               | Every control, including **Clear decoration** and **Undo**, stays visible and clickable                                                                                                 |
 
 Items 3, 9, 10, 11, 13 and 16 cannot be confirmed statically — they need this instance.

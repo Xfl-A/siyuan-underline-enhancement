@@ -11,11 +11,11 @@
   "publish": { "resources": [], "data": [] },
   "displayName": { "default": "Underline Enhancement", "zh-CN": "下划线增强" },
   "description": {
-    "default": "Configure underline and overline line styles and colors from the editor floating toolbar.",
-    "zh-CN": "在编辑器浮动工具栏中分别设置下划线与上划线的线型和颜色。"
+    "default": "Configure the underline's line style and color from the editor floating toolbar.",
+    "zh-CN": "在编辑器浮动工具栏中设置下划线的线型和颜色。"
   },
   "readme": { "default": "README.md", "zh-CN": "README.zh-CN.md" },
   "icon": "icon.png",
   "preview": "preview.png",
-  "keywords": ["下划线", "上划线", "线型", "编辑器", "underline", "overline", "decoration", "editor"]
+  "keywords": ["下划线", "线型", "波浪线", "编辑器", "underline", "wavy", "decoration", "editor"]
 }

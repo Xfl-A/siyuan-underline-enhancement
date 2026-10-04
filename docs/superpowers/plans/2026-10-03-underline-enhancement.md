@@ -1,5 +1,13 @@
 # 下划线增强（siyuan-underline-enhancement）实施计划
 
+> **本文档是 2026-10-03 的执行记录，其中两项已在发布前作废，照着做会走错：**
+>
+> 1. **上划线方向**（2026-10-04，用户删除）。只保留下划线，`IDecorationPair` 塌成单个 `IDecoration`，
+>    嵌套 span 路径移除。凡提到「两个方向」「上划线」的任务与断言都已不适用。
+> 2. **`data-sue` 标记属性**（2026-10-04）。思源存盘会丢弃自定义属性，改为按 `text-decoration-line` 识别。
+>
+> 模块划分（`model.ts` / `dom.ts` / `persist.ts` / `panel.ts` / `index.ts`）与保存通道仍与实现一致。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 为思源笔记构建一个编辑器插件，在 Protyle 浮动工具栏加入「下划线增强」按钮，用 CSS `text-decoration` 为选中文本分别设置下划线与上划线的线型和颜色，设置实时预览。
