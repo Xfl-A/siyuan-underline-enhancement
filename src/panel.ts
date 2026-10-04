@@ -10,7 +10,10 @@
  *
  * 面板里的控件全部是不可聚焦的 div：可聚焦的元素会在按下时把焦点从 contenteditable 带走，
  * 思源随之清掉选区，浮动工具栏也跟着收起，面板记下的字符偏移于是不再指向用户的文字。
- * 因此点任何控件都只收面板自己（options.onClose），浮动工具栏由用户继续用。
+ *
+ * 控件分两类，收不收面板也分两类：设置类（线型、颜色、跟随文字色、方向开关）改的是同一次选择上的参数，
+ * 一边调一边看着效果才调得准，因此点完留着面板、留着选区与浮动工具栏；
+ * 终止类（清除装饰、撤销、原生取色器）做完就收工，没有下一次可调。浮动工具栏任何情况下都不由面板收。
  */
 import {getEventName} from "./dom";
 import {
@@ -46,9 +49,21 @@ export interface IPanelOptions {
      * 不说清楚的话，第一下点击就会静默改写用户没打算动的那些区域。
      */
     mixed?: boolean;
+    /**
+     * 本次面板会话里还有没有可撤销的改动；调用方据此决定撤销键是否可用。
+     *
+     * 撤销是面板里唯一一个可以有禁用态的控件：设置类控件每一下都是新意图，
+     * 而一个「按了没反应」的撤销键只会让人反复去按它。没给这个值时按「有东西可撤销」处理，
+     * 免得面板凭空摆出一个按不动的按钮。
+     */
+    undoEnabled?: boolean;
     onChange: (decoration: IDecoration) => void;
     onClear: () => void;
     onUndo: () => void;
+    /**
+     * 收起面板。只由终止类控件（清除装饰、撤销、原生取色器）、面板外的点击与 Esc 请出：
+     * 设置类控件不碰它，否则用户每调一项设置就被打断一次。
+     */
     onClose: () => void;
     /**
      * 原生取色器挑完颜色之后调用：清掉选区，并收起思源的浮动工具栏。
@@ -70,6 +85,11 @@ export interface IPanelController {
      * 这不是用户操作，因此不触发 onChange。第二个实参重报选区是否仍不一致（撤销之后要重新判一次）。
      */
     setDecoration: (decoration: IDecoration, mixed?: boolean) => void;
+    /**
+     * 报一次「还有没有东西可撤销」，面板据此重画撤销键的禁用态。
+     * 每次改动与每次撤销之后都要报：栈深只有调用方掌握。
+     */
+    setUndoEnabled: (enabled: boolean) => void;
     /** 移除面板并摘掉所有监听；可重复调用 */
     destroy: () => void;
 }
@@ -535,6 +555,21 @@ const markChecked = (element: HTMLElement, checked: boolean): void => {
     element.setAttribute("aria-checked", checked ? "true" : "false");
 };
 
+/**
+ * 标记控件的禁用态。
+ *
+ * 控件是 div，没有 disabled 属性可设，语义与外观因此共用 aria-disabled 这一条：
+ * 样式表按同一个属性画出禁用外观，按下时那条监听里还会再问一遍状态，禁用中的一律不回调。
+ * 只有撤销键会带上它 —— 设置类控件永远可点。
+ */
+const markDisabled = (element: HTMLElement, disabled: boolean): void => {
+    if (disabled) {
+        element.setAttribute("aria-disabled", "true");
+    } else {
+        element.removeAttribute("aria-disabled");
+    }
+};
+
 export const createPanel = (options: IPanelOptions): IPanelController => {
     // 面板必须与锚点同属一个 document，否则量到的 rect 与写入的坐标不在同一坐标系
     const ownerDocument = options.anchor?.ownerDocument ?? document;
@@ -549,6 +584,8 @@ export const createPanel = (options: IPanelOptions): IPanelController => {
     let decoration = sanitizeDecoration(options.initialDecoration);
     // 选区里的装饰不一致时先挂提示；用户改一次之后整个选区就被统一了，提示随之撤掉
     let mixed = options.mixed === true;
+    // 撤销栈只有调用方掌握；没报就按「有东西可撤销」处理，面板不凭空摆出一个按不动的按钮
+    let undoEnabled = options.undoEnabled !== false;
     let destroyed = false;
 
     const panel = createElement<HTMLDivElement>(ownerDocument, "div", "");
@@ -618,6 +655,8 @@ export const createPanel = (options: IPanelOptions): IPanelController => {
     /** 把面板内部状态画到控件上 */
     const render = (): void => {
         mixedHint.hidden = !mixed;
+        // 撤销是面板里唯一可能有禁用态的控件：栈空了它就该摆成按不动的样子
+        markDisabled(undoButton, !undoEnabled);
         const color = sanitizeColor(decoration.color);
         for (const direction of DIRECTIONS) {
             const widgets = sections[direction];
@@ -631,7 +670,7 @@ export const createPanel = (options: IPanelOptions): IPanelController => {
             }
             syncCustomSwatch(ownerDocument, widgets, color, {
                 eventName,
-                bind: (value: string) => activate({color: sanitizeColor(value), enabled: true}),
+                bind: (value: string) => update({color: sanitizeColor(value), enabled: true}),
             });
             // 块上已有的自定义色既不在预设里、也不跟随文字色，取色器要跟着显示它；
             // 颜色不是 #rrggbb 时不动控件，免得把用户刚挑的颜色抹成黑色
@@ -661,32 +700,24 @@ export const createPanel = (options: IPanelOptions): IPanelController => {
     /** 提交「只改某个字段」的那条路径；色块、开关与临时色块都走它 */
     const update = (patch: Partial<IDecoration>): void => commit({...decoration, ...patch});
 
-    /**
-     * 一次控件激活：先提交改动，再收起面板。
-     *
-     * 顺序不能反：提交要一路走到调用方去改文档，而收面板会把这批分组与偏移一并丢掉。
-     * 与思源自己的颜色菜单一致 —— 挑完就收起，浮动工具栏与选区都留在原地，用户可以接着调。
-     */
-    const activate = (patch: Partial<IDecoration>): void => {
-        update(patch);
-        options.onClose();
-    };
-
     for (const direction of DIRECTIONS) {
         const widgets = sections[direction];
         // 线型与颜色两行永远可点：方向关着的时候点它们就是把下划线打开并用上这个值，
-        // 否则这两行会变成一批点下去毫无反应的控件
+        // 否则这两行会变成一批点下去毫无反应的控件。
+        // 四类设置控件都只提交、不收面板：一次选择上往往要连着调线型与颜色，
+        // 收一次就得重新选中一次，用户还没看清效果面板就已经没了
         for (const swatch of widgets.styleSwatches) {
             const style = swatch.getAttribute(STYLE_ATTRIBUTE) as TLineStyle;
-            swatch.addEventListener(eventName, () => activate({style, enabled: true}));
+            swatch.addEventListener(eventName, () => update({style, enabled: true}));
         }
         for (const swatch of widgets.colorSwatches) {
             const color = swatch.getAttribute(COLOR_ATTRIBUTE);
-            swatch.addEventListener(eventName, () => activate({color: sanitizeColor(color), enabled: true}));
+            swatch.addEventListener(eventName, () => update({color: sanitizeColor(color), enabled: true}));
         }
-        widgets.followSwatch.addEventListener(eventName, () => activate({color: "", enabled: true}));
-        // 开关自己切换勾选状态：它不是 input，取不到原生 checkbox 的激活行为
-        widgets.toggle.addEventListener(eventName, () => activate({enabled: !decoration.enabled}));
+        widgets.followSwatch.addEventListener(eventName, () => update({color: "", enabled: true}));
+        // 开关自己切换勾选状态：它不是 input，取不到原生 checkbox 的激活行为。
+        // 从关到开是一次真的改动：提交出去的那份配置会被真的裹到文档上，而不只是翻面板内部的开关
+        widgets.toggle.addEventListener(eventName, () => update({enabled: !decoration.enabled}));
         /**
          * 取色器是面板里唯一必须收场的控件。
          *
@@ -701,6 +732,7 @@ export const createPanel = (options: IPanelOptions): IPanelController => {
         });
     }
     clearButton.addEventListener(eventName, () => {
+        // 清除是终止类操作：做完整段选区就没有装饰了，接着调也没有意义，因此做完收面板
         // 清除同样把整个选区统一了，混合状态到此为止
         if (mixed) {
             mixed = false;
@@ -710,6 +742,11 @@ export const createPanel = (options: IPanelOptions): IPanelController => {
         options.onClose();
     });
     undoButton.addEventListener(eventName, () => {
+        // 禁用态是面板里唯一一处真的按了没反应：没有东西可撤销时既不撤销也不收面板，
+        // 亮着的按钮会让人以为按过就该有效果
+        if (!undoEnabled) {
+            return;
+        }
         options.onUndo();
         options.onClose();
     });
@@ -753,6 +790,13 @@ export const createPanel = (options: IPanelOptions): IPanelController => {
                 mixed = nextMixed;
             }
             render();
+        },
+        setUndoEnabled: (enabled: boolean) => {
+            if (destroyed || undoEnabled === enabled) {
+                return;
+            }
+            undoEnabled = enabled;
+            markDisabled(undoButton, !undoEnabled);
         },
         destroy: () => {
             if (destroyed) {

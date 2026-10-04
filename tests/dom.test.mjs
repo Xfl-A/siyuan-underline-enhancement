@@ -22,6 +22,8 @@ const {
 const {
     collectEditableGroups,
     stripDecorationIn,
+    nativeUnderlineElementsIn,
+    stripNativeUnderlineIn,
     applySpansIn,
     captureOffsets,
     restoreOffsets,
@@ -1172,7 +1174,8 @@ test("没声明装饰线的 span 不是装饰：读不出来，剥的时候也�
 });
 
 test("思源自己的 <u> 不算插件装饰：面板读不到，清除也不会碰它", () => {
-    // <u> 是用户按思源工具栏按钮加的下划线，属于思源自己的行内标记
+    // <u> 是思源那套行内标记：装饰的读与剥都不认它。面板打开那一步另有专脱它的路
+    // （stripNativeUnderlineIn），那一步与装饰身份无关
     const html = '<p data-type="text" data-node-id="p1">plain <u>underline</u>' +
         '<u style="text-decoration-line: underline">styled</u> more</p>';
     const cleanup = mount(editor(html));
@@ -1185,6 +1188,138 @@ test("思源自己的 <u> 不算插件装饰：面板读不到，清除也不会
     stripDecorationIn(paragraph);
 
     assert.equal(paragraph.innerHTML, before, "<u> 不是本插件的装饰，清除时必须原样留着");
+    cleanup();
+});
+
+// --------------------------------------------------------- 思源自己的 <u>：扫描与脱除
+
+/** 夹具里的一处思源原生下划线 */
+const nativeUnderline = (text) => `<u>${text}</u>`;
+/** 区域内 <u> 的文本，文档顺序 */
+const nativeUnderlineTexts = (root) => Array.from(root.querySelectorAll("u")).map((element) => element.textContent);
+
+test("nativeUnderlineElementsIn 只报与范围真正重叠的那些 <u>", () => {
+    const cleanup = mount(editor(
+        '<p data-type="text" data-node-id="p1">a ' + nativeUnderline("b") +
+            " c " + nativeUnderline("d") + " e</p>",
+    ));
+    const paragraph = document.querySelector("p");
+    // "a b c d e"：a=[0] 空=[1] b=[2] 空=[3] c=[4] 空=[5] d=[6] 空=[7] e=[8]
+    // 两个 <u> 分别占 [2, 3) 与 [6, 7)
+    const textsIn = (start, end) =>
+        toHost(nativeUnderlineElementsIn(paragraph, {start, end}).map((element) => element.textContent));
+
+    assert.deepEqual(textsIn(0, 9), ["b", "d"], "整段都被选中：两个都在内");
+    assert.deepEqual(textsIn(3, 7), ["d"], "[3, 7) 只与第二个 <u> 相交");
+    assert.deepEqual(textsIn(0, 2), [], "与范围首尾相接不算重叠：第一个 <u> 在范围之外");
+    assert.deepEqual(textsIn(3, 6), [], "同样首尾相接：第二个 <u> 落在范围之外");
+    assert.deepEqual(textsIn(2, 3), ["b"], "范围正好盖住第一个 <u>");
+    assert.deepEqual(textsIn(0, 3), ["b"], "终点压在 <u> 末尾：算在内");
+    cleanup();
+});
+
+test("nativeUnderlineElementsIn 不给范围即整块都算，一个 <u> 也没有时给空数组", () => {
+    const cleanup = mount(editor('<p data-type="text" data-node-id="p1">a ' + nativeUnderline("b") + " c</p>"));
+    const paragraph = document.querySelector("p");
+    assert.deepEqual(
+        toHost(nativeUnderlineElementsIn(paragraph, null).map((element) => element.textContent)),
+        ["b"],
+    );
+    cleanup();
+
+    const clean = mount(editor('<p data-type="text" data-node-id="p1">no underline here</p>'));
+    assert.deepEqual(toHost(nativeUnderlineElementsIn(document.querySelector("p"), null)), []);
+    clean();
+    cleanup();
+});
+
+test("stripNativeUnderlineIn 脱掉范围内的 <u>，一个字都不改", () => {
+    const cleanup = mount(
+        editor('<p data-type="text" data-node-id="p1">pre ' + nativeUnderline("under") + " post</p>"),
+    );
+    const paragraph = document.querySelector("p");
+    const before = paragraph.textContent;
+    assert.equal(before, "pre under post");
+
+    stripNativeUnderlineIn(paragraph, {start: 4, end: 9});
+
+    assert.deepEqual(nativeUnderlineTexts(paragraph), [], "选区里的 <u> 脱掉了");
+    assert.equal(paragraph.innerHTML, "pre under post", "解包而不是删内容");
+    assert.deepEqual(toHost(textNodesOf(paragraph).map((node) => node.data)), ["pre ", "under", " post"]);
+    cleanup();
+});
+
+test("stripNativeUnderlineIn 落在范围之外的 <u> 一个都不动", () => {
+    const html = '<p data-type="text" data-node-id="p1">a ' + nativeUnderline("b") + " c " + nativeUnderline("d") +
+        " e</p>";
+    const cleanup = mount(editor(html));
+    const paragraph = document.querySelector("p");
+    // 只脱第二个：另一个是用户此前保存下来的另一处标记，不该被这次顺带抹掉
+    stripNativeUnderlineIn(paragraph, {start: 3, end: 7});
+
+    assert.deepEqual(nativeUnderlineTexts(paragraph), ["b"], "范围之外的 <u> 原样留着");
+    assert.equal(paragraph.textContent, "a b c d e", "文字逐字不变");
+    assert.ok(paragraph.innerHTML.includes(nativeUnderline("b")), "<u> 连标签都还在");
+    assert.ok(!paragraph.innerHTML.includes(nativeUnderline("d")), "选区里的那个脱掉了");
+    cleanup();
+});
+
+test("stripNativeUnderlineIn 把半个 <u> 整条脱掉：解包是原子的", () => {
+    // 行内元素无法按字符偏移切成两半，留半截又会让选区里那部分叠成两条线，因此相交即整条脱
+    const cleanup = mount(editor('<p data-type="text" data-node-id="p1">ab ' + nativeUnderline("cdef") + " gh</p>"));
+    const paragraph = document.querySelector("p");
+    const before = paragraph.textContent;
+    assert.equal(before, "ab cdef gh");
+
+    stripNativeUnderlineIn(paragraph, {start: 0, end: 5});
+
+    assert.deepEqual(nativeUnderlineTexts(paragraph), [], "与范围相交的 <u> 整条脱掉");
+    assert.equal(paragraph.textContent, before, "落在选区之外的那半截同样保留文字");
+    cleanup();
+});
+
+test("stripNativeUnderlineIn 把塌成一点或起止颠倒的范围当作没有范围", () => {
+    const cleanup = mount(editor('<p data-type="text" data-node-id="p1">a ' + nativeUnderline("b") + " c</p>"));
+    const paragraph = document.querySelector("p");
+    const before = paragraph.innerHTML;
+
+    // 零宽范围覆盖不到任何字符，一个标记都不该动
+    stripNativeUnderlineIn(paragraph, {start: 2, end: 2});
+
+    assert.equal(paragraph.innerHTML, before, "塌成一点的范围不该脱掉任何 <u>");
+
+    stripNativeUnderlineIn(paragraph, {start: 5, end: 1});
+
+    assert.equal(paragraph.innerHTML, before, "起止颠倒的范围同样按「没有范围」处理");
+    cleanup();
+});
+
+test("stripNativeUnderlineIn 不给范围即整块清理，嵌套的 <u> 也一起脱掉", () => {
+    const cleanup = mount(editor('<p data-type="text" data-node-id="p1">x <u>in<u>ner</u></u> y</p>'));
+    const paragraph = document.querySelector("p");
+    const before = paragraph.textContent;
+    assert.equal(before, "x inner y");
+
+    stripNativeUnderlineIn(paragraph);
+
+    assert.deepEqual(nativeUnderlineTexts(paragraph), [], "嵌套的两层都脱掉了");
+    assert.equal(paragraph.innerHTML, "x inner y");
+    cleanup();
+});
+
+test("stripNativeUnderlineIn 只在给出的区域里找，别的块里的 <u> 碰不到", () => {
+    const cleanup = mount(editor(
+        '<p data-type="text" data-node-id="p1">a ' + nativeUnderline("b") + "</p>" +
+            '<p data-type="text" data-node-id="p2">c ' + nativeUnderline("d") + "</p>",
+    ));
+    const first = document.querySelector('[data-node-id="p1"]');
+    const second = document.querySelector('[data-node-id="p2"]');
+
+    stripNativeUnderlineIn(first, {start: 0, end: 3});
+
+    assert.deepEqual(nativeUnderlineTexts(first), []);
+    assert.deepEqual(nativeUnderlineTexts(second), ["d"], "另一个块里的 <u> 原样");
+    assert.equal(second.innerHTML, "c " + nativeUnderline("d"));
     cleanup();
 });
 

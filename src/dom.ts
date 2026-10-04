@@ -1,6 +1,6 @@
 /**
  * 装饰 span 的 DOM 应用层：把选区换算成「可编辑区域 + 字符偏移」，负责剥掉旧装饰、按描述包裹新 span、
- * 清理解包残留，并给出面板与编辑器交互要用的事件名。
+ * 脱掉思源自己的 `<u>`、清理解包残留，并给出面板与编辑器交互要用的事件名。
  *
  * 全程只以 `editableElement.textContent` 的字符偏移为坐标系，不搬运活的 Range：
  * 剥离装饰只改变嵌套关系、不改变 textContent，所以「先算偏移 → 再剥 → 再包」这条顺序下偏移始终有效。
@@ -31,6 +31,13 @@ export interface IOffsetRange {
  * 装饰身份因此只由 style 声明的装饰线决定，插件写出的 span 也不再带标记属性。
  */
 const DECORATION_SPAN_SELECTOR = "span[style]";
+
+/**
+ * 思源自己的下划线标记：思源工具栏的下划线按钮，以及 Markdown / HTML 的下划线语法，落成的都是 <u>。
+ *
+ * 它不是插件的装饰，因此不参与装饰的读与剥（见 isDecorationSpan）；面板打开时另有一步专脱它。
+ */
+const NATIVE_UNDERLINE_SELECTOR = "u";
 
 /**
  * 装饰线关键字；按整枚 token 相等比对，underline.png 之类的字样不算声明。
@@ -311,7 +318,8 @@ const declaresLine = (declarations: string): boolean => {
 /**
  * 这个 span 是不是本插件的装饰：只看它自己的 inline style 有没有声明装饰线。
  *
- * 只认 span：思源自己的 <u> 是用户按它工具栏按钮加的下划线，属于思源自己的行内标记。
+ * 只认 span：思源自己的 `<u>` 是思源那套行内标记，不是插件写出的装饰，因此读样式与剥除都不认它；
+ * 面板打开时脱掉它走的是 stripNativeUnderlineIn，与装饰身份无关。
  * 带 style 的非 span 元素同样不算，装饰的落盘形态只有 span 一种。
  *
  * 读值先走 CSSOM（值已被浏览器归一）；长属性读不到时退回简写，简写也读不到时再退回 style 属性串 ——
@@ -336,30 +344,49 @@ const isDecorationSpan = (element: Element): boolean => {
 };
 
 /**
- * 区域内的装饰 span，文档顺序。
+ * 按字符偏移挑出与范围真正重叠的那些元素；range 为 null 时整批都算。
  *
- * 给出范围时只保留与它真正重叠的那些，判定按字符偏移做：spanStart < end && spanEnd > start。
+ * 区域内的两种标记（插件的装饰 span、思源自己的 `<u>`）都走它：重叠的判据只有一处，
+ * 两条路径才不可能对同一段文字给出相反的答案。
+ *
+ * 判定按字符偏移做：spanStart < end && spanEnd > start。
  * 不用 Range.intersectsNode：那条谓词是不对称的 —— 范围终点与 span 起点相接不算相交（安全），
  * 但范围起点与 span 终点相接**算**相交。于是「从一个装饰词之后开始选中」（点击词尾再 Shift+End，
  * collectEditableGroups 丢掉零宽片段后起点落在后一个文本节点的偏移上）会把那块装饰当成在选区内：
  * stripDecorationIn 把它解包，applySpansIn 不会再包回去，装饰就此从文档里消失并随这次保存落盘。
  *
- * 读样式（readDecorationStylesIn）走同一个判定，两者才能对同一段文字给出同一个答案。
- * range 为 null 表示「整块都算」。
+ * 一个字符都不占的空壳没有可重叠的区间，动它只会顺手丢掉解包残留之外的别的东西。
  */
-const decorationSpansIn = (editableElement: HTMLElement, range: IOffsetRange | null): HTMLElement[] => {
-    const spans = Array.from(editableElement.querySelectorAll(DECORATION_SPAN_SELECTOR))
-        .filter(isDecorationSpan) as HTMLElement[];
+const overlappingElements = <T extends HTMLElement>(
+    editableElement: HTMLElement,
+    elements: T[],
+    range: IOffsetRange | null,
+): T[] => {
     if (range === null) {
-        return spans;
+        return elements;
     }
     const index = offsetIndexOf(editableElement);
-    return spans.filter((span) => {
-        const offsets = offsetsOfElement(index, span);
-        // 一个字符都不占的空壳 span 没有可重叠的区间，剥它只会顺手丢掉解包残留之外的别的东西
+    return elements.filter((element) => {
+        const offsets = offsetsOfElement(index, element);
         return offsets !== null && offsets.start < range.end && offsets.end > range.start;
     });
 };
+
+/**
+ * 区域内的装饰 span，文档顺序。
+ *
+ * 给出范围时只保留与它真正重叠的那些；重叠怎么判由 overlappingElements 给出，
+ * 读样式（readDecorationStylesIn）走同一套判据，两者才能对同一段文字给出同一个答案。
+ * range 为 null 表示「整块都算」。
+ */
+const decorationSpansIn = (editableElement: HTMLElement, range: IOffsetRange | null): HTMLElement[] =>
+    overlappingElements(
+        editableElement,
+        Array.from(editableElement.querySelectorAll(DECORATION_SPAN_SELECTOR)).filter(
+            isDecorationSpan,
+        ) as HTMLElement[],
+        range,
+    );
 
 /**
  * 剥掉区域内的装饰 span，只改嵌套关系，不动一个字。
@@ -385,6 +412,47 @@ export const stripDecorationIn = (editableElement: HTMLElement, offsets?: IOffse
     const spans = decorationSpansIn(editableElement, offsets ?? null);
     for (let i = spans.length - 1; i >= 0; i--) {
         unwrap(spans[i]);
+    }
+};
+
+/**
+ * 区域内与范围重叠的思源 `<u>`，文档顺序；range 为 null 表示整块都算。
+ *
+ * 作用域就是调用方给的那一段：同一个块里落在范围之外的 `<u>` 不在其中，
+ * 别的块与别的可编辑区域更在扫描范围之外（元素只在自己所属的区域里查）。
+ * 只按字符偏移判重叠，理由见 overlappingElements。
+ */
+export const nativeUnderlineElementsIn = (
+    editableElement: HTMLElement,
+    range: IOffsetRange | null,
+): HTMLElement[] =>
+    overlappingElements(
+        editableElement,
+        Array.from(editableElement.querySelectorAll(NATIVE_UNDERLINE_SELECTOR)) as HTMLElement[],
+        range,
+    );
+
+/**
+ * 剥掉与范围重叠的思源 `<u>`，只改嵌套关系，不动一个字。
+ *
+ * `<u>` 不是插件的装饰，因此装饰的剥除（stripDecorationIn）不碰它；脱它的是面板打开那一步：
+ * 插件接管这段文字的下划线之后，思源那一条必须让位，否则同一次选择上会同时出现两条线。
+ *
+ * 半个 `<u>` 按整个处理：解包是原子的，把一个行内元素按字符偏移切成两半既做不到，
+ * 留半截又会让它在选区内的那部分与插件的装饰叠成两条线。落在选区之外的那半截因此一并失去这条标记，
+ * 这是一个明确的取舍 —— 打开面板就是要把这段文字的下划线交给插件统一管。
+ *
+ * 范围塌成一点或起止颠倒时直接返回，与 stripDecorationIn 同一条理由：零宽范围不覆盖任何字符，
+ * 一个标记都不该动。不给范围即整块清理。
+ */
+export const stripNativeUnderlineIn = (editableElement: HTMLElement, offsets?: IOffsetRange): void => {
+    if (offsets !== undefined && offsets.end <= offsets.start) {
+        return;
+    }
+    const elements = nativeUnderlineElementsIn(editableElement, offsets ?? null);
+    // 从最内层开始拆：内层搬走的子节点正是外层要接着搬的
+    for (let i = elements.length - 1; i >= 0; i--) {
+        unwrap(elements[i]);
     }
 };
 

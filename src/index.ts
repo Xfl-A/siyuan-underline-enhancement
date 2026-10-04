@@ -18,11 +18,13 @@ import {
     applySpansIn,
     captureOffsets,
     collectEditableGroups,
+    nativeUnderlineElementsIn,
     offsetsWithinContent,
     readDecorationStylesIn,
     readFirstTextColor,
     reclaimEditableElement,
     restoreOffsets,
+    stripNativeUnderlineIn,
 } from "./dom";
 import type {IEditableGroup} from "./dom";
 import {UNDERLINE_ICON_SVG} from "./icons";
@@ -43,6 +45,7 @@ import {
     clearChanges,
     createDebouncedSaver,
     findBlockElement,
+    hasUndoableChange,
     recordChange,
     undoLastChange,
 } from "./persist";
@@ -73,10 +76,29 @@ const NODE_ID_ATTRIBUTE = "data-node-id";
  */
 const CLEARED_DECORATION: IDecoration = {...DEFAULT_DECORATION, enabled: false};
 
+/** 打开面板时从选区读到的状态 */
+interface ICurrentDecoration {
+    /** 面板的初值：选区里已有的装饰，或上次用过的配置 */
+    decoration: IDecoration;
+    /** 选区各区域的装饰不一致 */
+    mixed: boolean;
+    /** 选区里至少一组已经带着插件的装饰 */
+    decorated: boolean;
+}
+
+/** applyDecoration 的可选动作 */
+interface IApplyOptions {
+    /**
+     * 剥掉范围内的思源 `<u>`（见 stripNativeUnderlineIn）。
+     * 只有打开面板那一步要它：面板一接管这段文字的下划线，思源那一条就该让位。
+     */
+    dropNativeUnderline?: boolean;
+}
+
 export default class UnderlineEnhancement extends Plugin {
     /** 当前面板；null 表示没有打开的面板 */
     private panel: IPanelController = null;
-    /** 传给面板的实参对象；撤销栈只有本类掌握，面板不据此禁用撤销 */
+    /** 传给面板的实参对象；撤销栈只有本类掌握，面板按这里报出的状态决定撤销键是否可用 */
     private panelOptions: IPanelOptions = null;
     /** 打开面板时的选区分组；面板开着期间的每次改动都落到它上面 */
     private groups: IEditableGroup[] = [];
@@ -173,6 +195,9 @@ export default class UnderlineEnhancement extends Plugin {
             this.closePanel();
         };
         const current = this.readCurrentDecoration();
+        // 打开面板本身也可能就是一次改动：选区里没有下划线就把默认装饰真的应用上去，
+        // 思源自己的 <u> 也一并脱掉。放在建面板之前，量选区时看到的就是应用之后的排布
+        this.applyAtOpen(current);
         // 「跟随文字色」色块上的字母要显出装饰真正会取到的那个颜色，值只能从选中的文字上读；
         // 跨多个区域时取第一组：这一项的效果本来就只能给出一个颜色
         const followTextColor = readFirstTextColor(this.groups[0].editableElement);
@@ -184,6 +209,8 @@ export default class UnderlineEnhancement extends Plugin {
             // 选区里各区域的装饰不一致：面板要先说明再让用户点，
             // 否则第一下点击就会把没打算动的区域一并改写
             mixed: current.mixed,
+            // 撤销栈只有本类掌握；栈空时撤销键就摆成禁用，按它什么也不会发生
+            undoEnabled: hasUndoableChange(),
             onChange: (decoration: IDecoration) => this.applyDecoration(decoration),
             // 清除装饰就是提交一份下划线关闭的配置
             onClear: () => this.applyDecoration(CLEARED_DECORATION),
@@ -199,15 +226,44 @@ export default class UnderlineEnhancement extends Plugin {
     }
 
     /**
+     * 打开面板时的落笔。
+     *
+     * 选区里已经带着下划线：只把设置显示出来，文档一个字节都不动（重裹一遍已有的装饰只会多一次落盘）。
+     * 选区里没有下划线：把面板这一份配置真的应用上去 —— 只翻面板内部的开关，屏幕上仍然什么都不会出现，
+     * 用户看到的就会是「开关亮着却没有下划线」。这一次改动与用户自己点出来的改动走同一条路，
+     * 因此同样进撤销栈、同样按块防抖落盘。
+     *
+     * 记住的配置本身是关着（下划线关掉之后关闭面板记下的那一份）时不开：那是用户上一次的明确决定，
+     * 打开面板不该替他重新打开。要打开时点开关即可，那一步仍然会把装饰真的应用上去。
+     *
+     * 思源自己的 `<u>` 一律脱掉，与选区里有没有插件装饰无关：插件接管这段文字的下划线之后，
+     * 思源那一条必须让位，否则同一次选择上会同时出现两条线，而思源那条没有面板可以调。
+     */
+    private applyAtOpen(current: ICurrentDecoration): void {
+        const dropNativeUnderline = this.hasNativeUnderline();
+        if (!dropNativeUnderline && (current.decorated || !current.decoration.enabled)) {
+            return;
+        }
+        this.applyDecoration(current.decoration, {dropNativeUnderline});
+    }
+
+    /** 选区里有没有思源自己的 `<u>`；判定与脱除共用同一套字符偏移范围 */
+    private hasNativeUnderline(): boolean {
+        return this.groups.some((group) =>
+            nativeUnderlineElementsIn(group.editableElement, {start: group.start, end: group.end}).length > 0
+        );
+    }
+
+    /**
      * 把一份配置落到选区上：按内存中的分组重裹装饰，改完重建选区，最后按块调度保存。
      *
      * 分组是打开面板时记下的：面板上的控件都不可聚焦，编辑器不失焦，
      * 但重裹装饰之后原 Range 依然失效，可靠的坐标只有这里记下的字符偏移。
      *
      * 一个分组动到几个块就记几条块记录，但它们合起来只占撤销栈里的一条：用户做的是一次操作，
-     * 按一次撤销就该整体退回，而不是只退回最后一个块。
+     * 按一次撤销就该整体退回，而不是只退回最后一个块。打开面板时的应用同样算这一次操作里的唯一一条。
      */
-    private applyDecoration(decoration: IDecoration): void {
+    private applyDecoration(decoration: IDecoration, options: IApplyOptions = {}): void {
         // 思源随时会重渲染块，面板开着期间记下的引用随时可能脱管：每次应用都先重新认领，
         // 读块 HTML、包裹装饰与重建选区才都落在文档里那个节点上
         if (!this.claimBlocks() || !this.offsetsWithinContent()) {
@@ -222,6 +278,11 @@ export default class UnderlineEnhancement extends Plugin {
         for (const group of this.groups) {
             const blockElement = group.blockElement;
             const beforeHTML = blockElement.outerHTML;
+            // 打开面板那一步会先脱掉思源自己的 <u>：与随后的装饰合成同一次改动，
+            // 于是只落盘一次、按一次撤销也一起退回，beforeHTML 记的正是 <u> 还在时的样子
+            if (options.dropNativeUnderline === true) {
+                stripNativeUnderlineIn(group.editableElement, {start: group.start, end: group.end});
+            }
             applySpansIn(group.editableElement, group.start, group.end, css);
             const afterHTML = blockElement.outerHTML;
             const blockId = blockElement.getAttribute(NODE_ID_ATTRIBUTE);
@@ -250,8 +311,10 @@ export default class UnderlineEnhancement extends Plugin {
         }
         this.undoing = true;
         try {
-            // 栈空或剩余记录全部过期时返回 false：界面与文档都没变，不该重画面板
+            // 栈空或剩余记录全部过期时返回 false：文档没变，装饰与选区一律不重画；
+            // 但撤销键此刻确实按不动了，禁用态要跟着更新，否则它会一直亮着而按下去什么也不会发生
             if (!await undoLastChange()) {
+                this.panel?.setUndoEnabled(hasUndoableChange());
                 return;
             }
             // 撤销已经把改动写回内核，面板接下来只做回读：认不回来也没有东西要再写一次
@@ -326,34 +389,40 @@ export default class UnderlineEnhancement extends Plugin {
      *
      * 各分组一致时就用那一份；不一致时取第一份有装饰的，并如实报出「混合」，
      * 由面板先把这件事说清楚 —— 一次改动会把整个选区统一，用户该在点之前就知道。
-     * 全都没有装饰时回到上次用过的配置，没有记录就用默认值。
+     * 全都没有装饰时回到上次用过的配置，没有记录就用默认值，并报出「选区里没有装饰」。
      */
-    private readCurrentDecoration(): {decoration: IDecoration; mixed: boolean;} {
+    private readCurrentDecoration(): ICurrentDecoration {
         const decorations = this.groups.map((group) => {
             const styles = readDecorationStylesIn(group.editableElement, group.start, group.end);
             return readDecorationFromStyle(styles[0] ?? null);
         });
         const decorated = decorations.filter((item) => item.enabled);
         if (decorated.length === 0) {
-            return {decoration: this.rememberedDecoration ?? DEFAULT_DECORATION, mixed: false};
+            return {
+                decoration: this.rememberedDecoration ?? DEFAULT_DECORATION,
+                mixed: false,
+                decorated: false,
+            };
         }
         const first = decorated[0];
         const mixed = decorations.some((item) => !isSameDecoration(item, first));
-        return {decoration: first, mixed};
+        return {decoration: first, mixed, decorated: true};
     }
 
     /**
      * 把文档里的真实状态刷回面板。
      *
      * 清除与撤销都直接改文档，面板自己看不到结果（setDecoration 也不会触发 onChange，
-     * 否则会再来一轮改动）。撤销栈是否存在只由调用方掌握，面板不据此禁用撤销：
-     * 一个按了没反应的按钮比按了没效果更难懂，栈空时它仍然什么都不做。
+     * 否则会再来一轮改动）。撤销栈是否存在只由本类掌握，因此每次同步都把它的状态一并报给面板：
+     * 撤销是面板里唯一一个可以摆成禁用的控件 —— 设置类控件每一下都有新意图，
+     * 而「没有东西可撤销」的撤销键亮着只会让人反复按它。
      */
     private syncPanel(decoration: IDecoration, mixed = false): void {
         if (this.panelOptions === null) {
             return;
         }
         this.panel.setDecoration(decoration, mixed);
+        this.panel.setUndoEnabled(hasUndoableChange());
     }
 
     /**
@@ -379,8 +448,10 @@ export default class UnderlineEnhancement extends Plugin {
      */
     private closePanel(): void {
         if (this.panel !== null) {
-            // 面板开着就意味着有未到点的保存，离开前必须发出去
+            // 面板开着就意味着有未到点的保存，离开前必须发出去 —— 一个块一次 updateBlock，
+            // 上面这次 flush 就是那一次保存，它不会因此再存一份
             this.saver?.flush();
+            // 记住这次真正落到文档上的那一份（写的是插件自己的设置文件，与块保存互不相干）
             if (this.appliedDecoration !== null) {
                 this.saveDecoration(this.appliedDecoration);
             }
@@ -390,8 +461,9 @@ export default class UnderlineEnhancement extends Plugin {
             this.groups = [];
             this.offsets = [];
             this.appliedDecoration = null;
-            // 撤销栈不在这里清：面板收在每一次控件激活之后，一次会话已经短到装不下任何一次改动，
-            // 在这里清空等于撤销永远按不动。切换文档与卸载仍然照旧清空（见上），
+            // 撤销栈不在这里清：面板收在终止类控件激活与面板外点击之后，一次会话里可能已经装下
+            // 好几次改动（设置类控件不再收面板），在这里清空等于撤销永远按不动。
+            // 切换文档与卸载仍然照旧清空（见上），
             // 而撤销前的过期校验会保证记错的记录被丢掉而不是改坏文档。
         }
         if (this.toolbar !== null) {

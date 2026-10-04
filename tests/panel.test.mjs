@@ -145,6 +145,8 @@ const createFixture = (options = {}) => {
         initialDecoration,
         i18n: options.i18n ?? i18n,
         mixed: options.mixed === true,
+        // 不给就传 undefined：撤销键的可用状态只由调用方报，面板自己不知道栈里有没有东西
+        undoEnabled: options.undoEnabled,
         // 不给就传 undefined：面板必须自己判断这个值能不能用，而不是当成字符串收下
         followTextColor: options.followTextColor,
         onChange: (decoration) => calls.push({type: "change", decoration: toHost(decoration)}),
@@ -237,8 +239,8 @@ const createFixture = (options = {}) => {
 /**
  * 点一个控件并给出这一夹具的全部回调记录。
  *
- * 面板在任何一次激活之后都会收起自己，因此多步交互必须一步一个夹具：
- * 每一步都用上一步的结果当初值，链条才能连起来。
+ * 多步交互现在可以留在同一块面板上：设置类控件不再收面板，只有终止类控件才收。
+ * 仍然要一次一步的夹具，是因为每一步都要拿一个干净的调用记录来数回调。
  */
 const activate = (element, options = {}) => {
     const fixture = createFixture(options);
@@ -390,8 +392,8 @@ test("线型色块禁止空白折叠，预览线才画得满色块", () => {
 // ------------------------------------------------------------------ 回填
 
 test("开关无论开合，样式与颜色两行的控件都不带 disabled 或 aria-disabled", () => {
-    // 面板里不允许出现任何「按了没反应」的控件：没有 disabled，也没有换皮的 aria-disabled。
-    // 方向关着时这两行仍然可点，点下去就是把下划线打开并用上这个值
+    // 设置类控件不允许出现任何「按了没反应」的状态：方向关着时这两行仍然可点，
+    // 点下去就是把下划线打开并用上这个值。撤销键的禁用态是另一回事，由调用方单独报
     for (
         const initialDecoration of [
             DEFAULT_DECORATION,
@@ -400,11 +402,13 @@ test("开关无论开合，样式与颜色两行的控件都不带 disabled 或 
             {...CUSTOM_DECORATION, enabled: false},
         ]
     ) {
-        const {panel, close} = createFixture({initialDecoration});
+        const {panel, close} = createFixture({initialDecoration, undoEnabled: false});
+        const inert = Array.from(panel.querySelectorAll("[disabled], [aria-disabled]"))
+            .filter((element) => element.getAttribute("data-sue-action") !== "undo");
         assert.deepEqual(
-            Array.from(panel.querySelectorAll("[disabled], [aria-disabled]")).map((element) => element.outerHTML),
+            inert.map((element) => element.outerHTML),
             [],
-            `出现了被禁用的控件：${JSON.stringify(initialDecoration)}`,
+            `出现了被禁用的设置类控件：${JSON.stringify(initialDecoration)}`,
         );
         close();
     }
@@ -558,27 +562,51 @@ test("点击线型色块后 onChange 收到新的线型，其余字段原样带�
     close();
 });
 
-test("点任何一类控件都会收起面板，且 onClose 恰好一次", () => {
-    // 与思源自己的颜色菜单一致：挑完就收起，浮动工具栏与选区留在原地。
-    // 收面板绝不能吃掉那次改动，也不能被触发两次
+test("设置类控件不收面板，终止类控件收面板且 onClose 恰好一次", () => {
+    // 一次选择上往往要连着调线型与颜色，每调一项就收一次面板等于每调一项都要重选一次。
+    // 终止类操作做完没有下一次可调（清除之后整段没有装饰、撤销之后回到上一步、
+    // 原生取色器那条路上选区与浮动工具栏本来就已经收摊），因此它们照旧收工。
     // 每一项给出「点它应当报上来的回调」与次数。临时自定义色色块按定义就是当前正在用的那个颜色，
-    // 点它因此没有任何新意图，只有「面板确实收掉了」这一条可以证明它的监听是活的
+    // 点它因此没有任何新意图，只有它仍被绑上了监听这件事可证
     const steps = [
-        ["线型色块", (f) => f.styleSwatchOf("underline", "wavy"), {}, "change", 1],
-        ["颜色色块", (f) => f.colorSwatchesOf("underline")[5], {}, "change", 1],
-        ["跟随文字色色块", (f) => f.followSwatchOf("underline"), {}, "change", 1],
-        ["临时自定义色色块", (f) => f.customSwatchOf("underline"), {initialDecoration: CUSTOM_DECORATION}, "change", 0],
-        ["方向开关", (f) => f.switchOf("underline"), {}, "change", 1],
-        ["清除装饰", (f) => f.actionButton("clear"), {}, "clear", 1],
-        ["撤销", (f) => f.actionButton("undo"), {}, "undo", 1],
-        ["原生取色器", () => {}, {pickColor: "#123456"}, "change", 1],
+        ["线型色块", (f) => f.styleSwatchOf("underline", "wavy"), {}, "change", 1, 0],
+        ["颜色色块", (f) => f.colorSwatchesOf("underline")[5], {}, "change", 1, 0],
+        ["跟随文字色色块", (f) => f.followSwatchOf("underline"), {}, "change", 1, 0],
+        [
+            "临时自定义色色块",
+            (f) => f.customSwatchOf("underline"),
+            {initialDecoration: CUSTOM_DECORATION},
+            "change",
+            0,
+            0,
+        ],
+        ["方向开关", (f) => f.switchOf("underline"), {}, "change", 1, 0],
+        ["清除装饰", (f) => f.actionButton("clear"), {}, "clear", 1, 1],
+        ["撤销", (f) => f.actionButton("undo"), {}, "undo", 1, 1],
+        ["原生取色器", () => {}, {pickColor: "#123456"}, "change", 1, 1],
     ];
-    for (const [name, element, options, applied, expected] of steps) {
+    for (const [name, element, options, applied, expected, closes] of steps) {
         const fixture = activate(element, options);
-        assert.equal(fixture.countOf("close"), 1, `${name} 必须恰好收起面板一次`);
-        assert.equal(fixture.countOf(applied), expected, `${name} 的改动必须先落地再收面板`);
+        assert.equal(fixture.countOf("close"), closes, `${name} 的收面板次数不对`);
+        assert.equal(fixture.countOf(applied), expected, `${name} 的改动必须先落地`);
         fixture.close();
     }
+});
+
+test("设置类控件连点多次，面板与选中态都留在原处", () => {
+    // 用户真实的工作方式：先挑线型，再挑颜色。面板必须一直在，控件上的选中态也必须跟着走
+    const fixture = createFixture();
+    fixture.styleSwatchOf("underline", "wavy").click();
+    fixture.colorSwatchesOf("underline")[5].click();
+    fixture.followSwatchOf("underline").click();
+
+    assert.equal(fixture.countOf("close"), 0, "三下设置都不收面板");
+    assert.equal(fixture.changes().length, 3, "三下各自产生一次改动");
+    assert.deepEqual(toHost(fixture.lastChange()), {enabled: true, style: "wavy", color: ""});
+    assert.equal(fixture.panel.isConnected, true, "面板仍在文档里");
+    assert.equal(fixture.styleSwatchOf("underline", "wavy").getAttribute("aria-pressed"), "true");
+    assert.equal(fixture.followSwatchOf("underline").getAttribute("aria-pressed"), "true");
+    fixture.close();
 });
 
 test("原生取色器挑完颜色：先应用，再清选区并收浮动工具栏，面板也收起", () => {
@@ -690,7 +718,7 @@ test("块上已有的自定义色既回填取色器、也补一块临时色块�
 });
 
 test("挑了自定义色之后整行只有一个色块被选中，换回预设色或跟随文字色后临时色块撤掉", () => {
-    // 每一步都要重新开一个夹具：面板在任何一次激活之后都会收起自己
+    // 每一步都重新开一个夹具：这样每一步的回调记录都是干净的，数得出这一��点了什么
     const picked = activate(() => {}, {initialDecoration: CUSTOM_DECORATION, pickColor: "#654321"});
     assert.equal(picked.lastChange().color, "#654321");
     assert.equal(picked.customSwatchesOf("underline").length, 1, "自定义色补一块临时色块");
@@ -718,14 +746,23 @@ test("挑了自定义色之后整行只有一个色块被选中，换回预设�
 
 test("自定义色的临时色块真的可点，与预设色块行为一致", () => {
     // 这块色块是渲染时才插进来的：只在构造期给预设色块绑事件的话，
-    // 它就是个长得一样却点不动的元素（点它面板不会收，可以据此分辨）
-    const fixture = createFixture({initialDecoration: CUSTOM_DECORATION});
+    // 它就是个长得一样却点不动的元素。方向关着时点它会「打开下划线并用上这个颜色」，
+    // 那是真实的一次提交，据此就能分辨它的监听确实绑上了
+    const fixture = createFixture({initialDecoration: {...CUSTOM_DECORATION, enabled: false}});
     const chip = fixture.customSwatchOf("underline");
     assert.ok(chip, "夹具前提：这里应当有一块自定义色色块");
     chip.click();
-    assert.equal(fixture.countOf("change"), 0, "它正在被使用，本来就没有新意图");
-    assert.equal(fixture.countOf("close"), 1, "点击确实走到了它自己的监听上");
+    assert.equal(fixture.countOf("change"), 1, "点击确实走到了它自己的监听上");
+    assert.deepEqual(fixture.lastChange(), CUSTOM_DECORATION);
+    assert.equal(fixture.countOf("close"), 0, "设置类控件不收面板");
     fixture.close();
+
+    // 这块色块当前正在被使用，点它没有任何新意图：既不回调，也照样不收面板
+    const current = createFixture({initialDecoration: CUSTOM_DECORATION});
+    current.customSwatchOf("underline").click();
+    assert.equal(current.countOf("change"), 0, "它正在被使用，本来就没有新意图");
+    assert.equal(current.countOf("close"), 0);
+    current.close();
 
     // 换成别处保存的另一个自定义色之后，这一块仍能接住点击：否则用户换不回同一个颜色
     const restored = createFixture({initialDecoration: {enabled: true, style: "solid", color: "#654321"}});
@@ -795,15 +832,94 @@ test("点击清除装饰与撤销分别调用 onClear 与 onUndo", () => {
     undo.close();
 });
 
-test("撤销永远可点：撤销栈空时点它什么也不改", () => {
-    // 面板不再有「暂无可撤销」这回事：按钮永远可点，栈空时它就是一次什么也不做的空操作。
-    // 代价是失去了那条视觉提示，换来的是面板里没有一个按了没反应的控件
+test("没有东西可撤销时撤销键摆成禁用态，按它什么也不做", () => {
+    // 撤销是面板里唯一一个可以有禁用态的控件：设置类控件每一下都是新意图，
+    // 而一个亮着的撤销键按下去什么也不会发生，只会让用户反复去按它。
+    // 控件是 div，没有 disabled 属性，语义只能记在 aria-disabled 上；真正的拦截在监听里
+    const {actionButton, countOf, close} = createFixture({undoEnabled: false});
+    const undo = actionButton("undo");
+    assert.equal(undo.getAttribute("aria-disabled"), "true", "禁用态必须由 aria-disabled 表达");
+    assert.equal(undo.hasAttribute("disabled"), false, "div 上没有 disabled 属性");
+    assert.equal(undo.getAttribute("role"), "button", "禁用不改角色：它仍然是那个按钮，只是此刻不可用");
+
+    undo.click();
+    assert.equal(countOf("undo"), 0, "禁用中的撤销键不回调");
+    assert.equal(countOf("close"), 0, "禁用中的撤销键也不收面板：它什么都没做");
+    close();
+});
+
+test("有东西可撤销时撤销键不带禁用态，点它照常撤销并收面板", () => {
+    const {actionButton, countOf, close} = createFixture({undoEnabled: true});
+    const undo = actionButton("undo");
+    assert.equal(undo.getAttribute("aria-disabled"), null, "可用时不带 aria-disabled");
+
+    undo.click();
+    assert.equal(countOf("undo"), 1, "撤销照常回调");
+    assert.equal(countOf("close"), 1, "撤销是终止类操作，做完收面板");
+    close();
+});
+
+test("调用方没报撤销栈状态时按「有东西可撤销」处理", () => {
+    // 面板自己不知道栈里有没有东西。没报就摆成可点，避免凭空给用户一个按不动的按钮；
+    // 调用方（src/index.ts）每次改动与每次撤销之后都会把真实状态报过来
     const {actionButton, countOf, close} = createFixture();
     const undo = actionButton("undo");
-    assert.equal(undo.hasAttribute("disabled"), false, "撤销按钮不带 disabled");
-    assert.equal(undo.getAttribute("aria-disabled"), null, "也不拿 aria-disabled 换皮");
+    assert.equal(undo.getAttribute("aria-disabled"), null);
     undo.click();
-    assert.equal(countOf("undo"), 1, "点击照常派发，栈是否为空由调用方判断");
+    assert.equal(countOf("undo"), 1);
+    close();
+});
+
+test("setUndoEnabled 重画撤销键的禁用态，且不影响设置类控件", () => {
+    const {controller, actionButton, styleSwatchOf, switchOf, followSwatchOf, colorSwatchesOf, countOf, close} =
+        createFixture({undoEnabled: false});
+    assert.equal(actionButton("undo").getAttribute("aria-disabled"), "true");
+
+    controller.setUndoEnabled(true);
+
+    const undo = actionButton("undo");
+    assert.equal(undo.getAttribute("aria-disabled"), null, "栈里有了东西就恢复可用");
+    undo.click();
+    assert.equal(countOf("undo"), 1, "恢复之后点击照常回调");
+    assert.equal(countOf("close"), 1);
+
+    // 设置类控件一个都不带禁用态：它们永远可点，禁用是撤销独有的
+    for (
+        const control of [
+            styleSwatchOf("underline", "wavy"),
+            colorSwatchesOf("underline")[5],
+            followSwatchOf("underline"),
+            switchOf("underline"),
+            actionButton("clear"),
+        ]
+    ) {
+        assert.equal(control.getAttribute("aria-disabled"), null, `设置类控件不该被禁用：${control.outerHTML}`);
+    }
+    close();
+});
+
+test("撤销键禁用时设置类控件全部可用，面板里只有它一个禁用态", () => {
+    const {panel, close} = createFixture({undoEnabled: false});
+    const disabled = Array.from(panel.querySelectorAll("[aria-disabled]"));
+    assert.deepEqual(
+        disabled.map((element) => element.getAttribute("data-sue-action")),
+        ["undo"],
+        "禁用态只属于撤销键：设置类控件每一下都是新意图，按了没反应才是问题",
+    );
+    // 换一批初值再来一遍：方向关着、色块选中状态不同，都不该冒出第二个禁用控件
+    for (
+        const initialDecoration of [
+            DEFAULT_DECORATION,
+            {...SOLID_DECORATION, enabled: false},
+            {...CUSTOM_DECORATION, enabled: false},
+        ]
+    ) {
+        const fixture = createFixture({initialDecoration, undoEnabled: false});
+        const others = Array.from(fixture.panel.querySelectorAll("[aria-disabled], [disabled]"))
+            .filter((element) => element.getAttribute("data-sue-action") !== "undo");
+        assert.deepEqual(others, [], `出现了第二个禁用控件：${JSON.stringify(initialDecoration)}`);
+        fixture.close();
+    }
     close();
 });
 
@@ -934,7 +1050,8 @@ test("临时插入的自定义色色块同样不是可聚焦元素", () => {
 });
 
 test("完整的按下-点击序列下，各类控件仍然响应", () => {
-    // 控件不是 input，因此没有原生的激活行为可用：click 事件本身就是全部
+    // 控件不是 input，因此没有原生的激活行为可用：click 事件本身就是全部。
+    // 设置类控件按完留着面板，终止类控件按完收面板
     const {
         styleSwatchOf,
         press,
@@ -946,24 +1063,27 @@ test("完整的按下-点击序列下，各类控件仍然响应", () => {
     press(styleSwatchOf("underline", "wavy"));
     assert.equal(countOf("change"), 1);
     assert.equal(lastChange().style, "wavy");
-    assert.equal(countOf("close"), 1, "按下-点击同样收面板");
+    assert.equal(countOf("close"), 0, "设置类控件按下-点击不收面板");
     close();
 
     const colour = createFixture();
     colour.press(colour.colorSwatchesOf("underline")[5]);
     assert.equal(colour.countOf("change"), 1);
     assert.equal(colour.lastChange().color, "#0090ff");
+    assert.equal(colour.countOf("close"), 0);
     colour.close();
 
     const follow = createFixture();
     follow.press(follow.followSwatchOf("underline"));
     assert.equal(follow.countOf("change"), 1);
     assert.equal(follow.lastChange().color, "");
+    assert.equal(follow.countOf("close"), 0);
     follow.close();
 
     const clear = createFixture();
     clear.press(clear.actionButton("clear"));
     assert.equal(clear.countOf("clear"), 1);
+    assert.equal(clear.countOf("close"), 1, "清除是终止类操作，做完收面板");
     clear.close();
 });
 
@@ -977,7 +1097,7 @@ test("移动端走 touchend 绑定，收面板的规则与桌面端一致", () =
     fire(styleSwatchOf("underline", "wavy"), "touchend");
     assert.equal(countOf("change"), 1);
     assert.equal(lastChange().style, "wavy");
-    assert.equal(countOf("close"), 1, "移动端同样收面板");
+    assert.equal(countOf("close"), 0, "移动端的设置类控件同样不收面板");
     close();
 });
 
@@ -1659,4 +1779,30 @@ test("面板根的尺寸约定与定位一致：最大宽度让出视口边距�
     assert.match(panelSource, /const MAX_HEIGHT = "\d+vh"/, "panel.ts 里必须给出桌面端限高常量");
     assert.match(panelSource, /panel\.style\.maxHeight = mobile \? MOBILE_MAX_HEIGHT : MAX_HEIGHT;/);
     assert.match(panelSource, /panel\.style\.overflowY = "auto"/, "面板仍须是纵向滚动容器");
+});
+
+// 撤销键的禁用态：div 没有 disabled 属性，语义由 aria-disabled 承担、外观由样式表给出。
+// jsdom 不应用样式表，因此核对选择器与声明。
+test("撤销键的禁用态由 aria-disabled 驱动，且样式表给出可辨认的禁用外观", () => {
+    const scss = readFileSync(new URL("../src/index.scss", import.meta.url), "utf8");
+    const panelSource = readFileSync(new URL("../src/panel.ts", import.meta.url), "utf8");
+    assert.match(panelSource, /const ACTION_ATTRIBUTE = "([^"]+)"/, "panel.ts 里必须有动作按钮的标记常量");
+    const actionAttribute = /const ACTION_ATTRIBUTE = "([^"]+)"/.exec(panelSource)[1];
+    // 选择器按动作名给出：清除装饰永远不会有禁用态，不必另给一条规则
+    const rule = new RegExp(
+        `\\[data-sue-panel\\]\\s*\\[${actionAttribute}="undo"\\]\\[aria-disabled="true"\\]\\s*\\{([^}]*)\\}`,
+    )
+        .exec(scss);
+    assert.ok(rule, "index.scss 里必须有撤销键的禁用态规则");
+    assert.match(rule[1], /\bopacity:\s*[^;]*;/, "禁用态要有一处可辨认的减弱：否则用户看不出它按不动");
+    assert.match(rule[1], /\bpointer-events:\s*none\s*;/, "禁用态要关掉指针事件，悬停反馈与浏览器默认行为一起停掉");
+    // 规则里不得出现 :has()：思源的用户样式表会重写面板所在的 DOM 树，选择器只认面板自己的标记
+    assert.ok(!scss.includes(":has("), "样式表不得使用 :has()");
+
+    const {actionButton, close} = createFixture({undoEnabled: false});
+    const undo = actionButton("undo");
+    assert.equal(undo.getAttribute("aria-disabled"), "true", "禁用态确实落在 aria-disabled 上");
+    // 真正让它按不动的不是样式，是监听里的那次判断：样式被覆盖时也不该回调
+    undo.click();
+    close();
 });

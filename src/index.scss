@@ -130,6 +130,15 @@
   box-shadow: 0 0 0 2px var(--b3-primary-color, var(--b3-theme-color, currentColor));
 }
 
+/* 撤销键的禁用态：控件是 div，没有 disabled 属性，语义与外观因此都由 aria-disabled 这一条承担 ——
+   它同时是样式表的选择器与监听里的判断依据，两边不会各说一套。设置类控件永远不带它，因此不会走到这里。
+   pointer-events 一并关掉，让悬停反馈也一起停掉，与浏览器里 disabled 按钮的手感一致。 */
+[data-sue-panel] [data-sue-action="undo"][aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: default;
+  pointer-events: none;
+}
+
 [data-sue-panel] [data-sue-actions] {
   gap: 8px;
 }
