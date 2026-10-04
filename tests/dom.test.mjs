@@ -1427,6 +1427,45 @@ test("captureOffsets and restoreOffsets return the selection to the same text af
     cleanup();
 });
 
+test("restoreOffsets 绝不调 focus()，也不让 rangeCount 归零", () => {
+    // 这两条是选中能被保住的前提，全部由思源前端的行为反推：
+    // 它在 document 上监听 selectionchange，看到 rangeCount 为 0 就收起浮动工具栏。
+    // 真机上 focus() 会把当前选区塌成光标，removeAllRanges() 则让 rangeCount 瞬时归零，
+    // 两者都会让用户正在用的选区与工具栏一起消失，而这两件事在 jsdom 里都看不出来
+    const fresh = createFixture();
+    const {document, window} = fresh;
+    const cleanup = fresh.mount(
+        '<div data-type="blocks" data-node-id="list1"><p data-type="text" data-node-id="p1">hello</p></div>',
+    );
+    const paragraph = document.querySelector("p");
+    const range = fresh.select(paragraph, 0, paragraph, 5);
+
+    let focusCalls = 0;
+    let removeAllCalls = 0;
+    const originalFocus = paragraph.focus.bind(paragraph);
+    paragraph.focus = () => {
+        focusCalls++;
+        originalFocus();
+    };
+    const selection = window.getSelection();
+    const originalRemoveAll = selection.removeAllRanges.bind(selection);
+    selection.removeAllRanges = () => {
+        removeAllCalls++;
+        originalRemoveAll();
+    };
+
+    const captured = fresh.module.captureOffsets(range);
+    restoreOffsets(captured);
+
+    assert.equal(focusCalls, 0, "重建选区不得调 focus()：真机上它会塌掉选区并触发思源收起工具栏");
+    assert.equal(removeAllCalls, 0, "重建选区不得清空选区：rangeCount 瞬时归零同样会收起工具栏");
+    assert.equal(selection.rangeCount, 1);
+    assert.equal(selection.toString(), "hello", "选区必须仍然落在同一段文字上");
+
+    cleanup();
+    fresh.close();
+});
+
 test("restoreOffsets ignores an empty capture instead of throwing", () => {
     // 单独一套 jsdom：共享环境里残留的选区会让断言依赖测试执行顺序
     const fresh = createFixture();

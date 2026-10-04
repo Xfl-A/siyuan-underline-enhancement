@@ -298,8 +298,11 @@ export default class UnderlineEnhancement extends Plugin {
         }
         // 一次操作只记一条记录：跨块的改动合起来撤一次
         recordChange(changed);
-        // 重建选区，用户可以接着输入，面板的下一次改动也还有坐标可用
-        restoreOffsets(this.offsets);
+        // 文档一个字节都没动时不碰选区：原 Range 仍然有效，
+        // 动它只会平白让思源看到一次 rangeCount 归零，把浮动工具栏收掉
+        if (changed.length > 0) {
+            restoreOffsets(this.offsets);
+        }
         this.appliedDecoration = sanitizeDecoration(decoration);
         this.syncPanel(this.appliedDecoration);
     }

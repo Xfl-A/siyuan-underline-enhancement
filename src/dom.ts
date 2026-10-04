@@ -664,10 +664,17 @@ export const captureOffsets = (range: Range): Array<[HTMLElement, number, number
 };
 
 /**
- * 按记下的偏移重建选区，并聚焦到最后一个可编辑区域，让用户可以接着输入。
+ * 按记下的偏移重建选区。
  *
- * 偏移按文档顺序使用：第一项当起点、最后一项当终点；先聚焦再设选区，
- * 因为聚焦会把光标放到元素里既有的位置，顺序反了选区就被冲掉。
+ * 刻意不调 focus()：真机上 focus() 会把当前选区塌成一个光标，
+ * 而思源在 document 上监听 selectionchange，一旦看到 rangeCount 归零就收起浮动工具栏
+ * （见思源前端里那段 `if (Ct.rangeCount === 0) { …隐藏全部工具栏… }`）。
+ * 面板的控件本来就不可聚焦，编辑器始终保持焦点，这里再动它只会把用户正在用的选区弄丢。
+ *
+ * 也刻意不用 removeAllRanges() + addRange()：那是两步，中间存在 rangeCount 为 0 的瞬间，
+ * 思源同样会因此收起工具栏。setBaseAndExtent 一步替换掉整个选区，全程 rangeCount 不为 0。
+ *
+ * 偏移按文档顺序使用：第一项当起点、最后一项当终点。
  */
 export const restoreOffsets = (captured: Array<[HTMLElement, number, number]>): void => {
     if (!captured || captured.length === 0) {
@@ -682,10 +689,16 @@ export const restoreOffsets = (captured: Array<[HTMLElement, number, number]>): 
     if (from === null || to === null || !selection) {
         return;
     }
+    const setSelection = selection.setBaseAndExtent;
+    if (typeof setSelection === "function") {
+        // 单步替换：全程 rangeCount 不归零，思源不会收起浮动工具栏
+        setSelection.call(selection, from.node, from.offset, to.node, to.offset);
+        return;
+    }
+    // 兜底：环境没有 setBaseAndExtent 时才退回两步写法
     const range = doc.createRange();
     range.setStart(from.node, from.offset);
     range.setEnd(to.node, to.offset);
-    last[0].focus();
     selection.removeAllRanges();
     selection.addRange(range);
 };
