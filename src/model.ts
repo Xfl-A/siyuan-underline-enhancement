@@ -13,7 +13,12 @@ export interface IDecoration {
     enabled: boolean;
     /** 线型 */
     style: TLineStyle;
-    /** 颜色；空字符串表示跟随文字颜色 */
+    /**
+     * 颜色；空字符串表示跟随文字颜色。
+     *
+     * 模型里只有这两种形态：具体颜色原值，或空串。currentColor 是「跟随」在 CSS 里的写法，
+     * 只出现在写进文档的那条声明上，由 sanitizeColor 归一成空串。
+     */
     color: string;
 }
 
@@ -70,10 +75,24 @@ export const DEFAULT_PAIR: IDecorationPair = Object.freeze({
 });
 
 /**
- * 颜色白名单：仅接受十六进制（含 alpha）与思源主题变量。
- * 正则整体锚定且不放过任何前后空白 —— 该值会落进持久化的文档 HTML，多余字符就能拼出第二条声明。
+ * 跟随文字颜色在 CSS 里的写法。
+ *
+ * 白名单与写出侧共用它，两边因此不会各写一份字面量而悄悄走岔。
  */
-const COLOR_PATTERN = /^(#[0-9a-fA-F]{3,4}|#[0-9a-fA-F]{6}|#[0-9a-fA-F]{8}|var\(--b3-[A-Za-z0-9_-]+\))$/;
+export const FOLLOW_COLOR_KEYWORD = "currentColor";
+
+/**
+ * 颜色白名单：十六进制（含 alpha）、思源主题变量，以及跟随文字颜色的 currentColor。
+ *
+ * 正则整体锚定、大小写不敏感且不放过任何前后空白 —— 该值会落进持久化的文档 HTML，
+ * 多余字符就能拼出第二条声明，因此 currentColor 只以整个关键字的形式匹配，
+ * 「currentColor #fff」「currentColor; …」这类复合写法一律落在外面。
+ */
+const COLOR_PATTERN = new RegExp(
+    "^(#[0-9a-fA-F]{3,4}|#[0-9a-fA-F]{6}|#[0-9a-fA-F]{8}|var\\(--b3-[A-Za-z0-9_-]+\\)|" +
+        `${FOLLOW_COLOR_KEYWORD})$`,
+    "i",
+);
 
 /** text-decoration-line 的位标记，用一个整数同时表达「下划线」和「上划线」 */
 const LINE_UNDERLINE = 1;
@@ -89,11 +108,19 @@ const LINE_KEYWORDS = new Map<string, number>([
 
 const isLineStyle = (token: string): boolean => LINE_STYLES.indexOf(token as TLineStyle) !== -1;
 
-/** 是否为合法的颜色值。`currentColor` 刻意不在白名单内：跟随文字色要靠省略属性实现 */
+/** 是否为合法的颜色值。currentColor 是合法值：跟随文字颜色就是靠它写进文档的 */
 export const isValidColor = (value: unknown): boolean => typeof value === "string" && COLOR_PATTERN.test(value);
 
-/** 返回合法颜色原值，非法值一律退回空字符串（即「跟随文字颜色」） */
-export const sanitizeColor = (value: unknown): string => (isValidColor(value) ? (value as string) : "");
+/**
+ * 颜色进入模型的唯一入口：合法颜色原样返回，其余一律退回空字符串（跟随文字颜色）。
+ *
+ * currentColor 也归成空串，于是模型里出现的颜色只有两种形态 —— 具体颜色，或跟随。
+ * 这条归一同时保证 currentColor 不会以字面量流进插件存储、面板的色块属性与临时色块逻辑。
+ */
+export const sanitizeColor = (value: unknown): string => {
+    const safe = isValidColor(value) ? (value as string) : "";
+    return safe.toLowerCase() === FOLLOW_COLOR_KEYWORD.toLowerCase() ? "" : safe;
+};
 
 /**
  * 计算色白名单：只收形状完整的 rgb() / rgba()，分量是 0–255 的整数，alpha 是 0–1 的小数且只配 rgba()。
@@ -230,7 +257,8 @@ const applyShorthand = (target: IParsedDecoration, value: string): void => {
         } else if (isLineStyle(token)) {
             target.style = token as TLineStyle;
         } else if (isValidColor(token)) {
-            target.color = token;
+            // currentColor 归一成空串：简写里写的也是「跟随」，不能留成字面量
+            target.color = sanitizeColor(token);
         }
     }
 };
@@ -314,16 +342,18 @@ const resolveLine = (position: TLinePosition): string => {
 
 /**
  * 生成单个 span 的 style 属性值，声明顺序固定为 line → style → color。
- * 颜色为空或未通过白名单时整条省略，由 CSS 的 currentColor 生效。
+ *
+ * 颜色始终显式写出。跟随文字颜色写成 currentColor 而不是省略这条声明：
+ * 省掉它时思源会改存一条 color，装饰于是取到的是文字色本身，落盘的属性也就换了个人。
  */
 export const buildDecorationCSS = (decoration: IDecoration, position: TLinePosition): string => {
     const style = isLineStyle(decoration?.style) ? decoration.style : DEFAULT_STYLE;
-    const declarations = [`text-decoration-line: ${resolveLine(position)}`, `text-decoration-style: ${style}`];
     const color = sanitizeColor(decoration?.color);
-    if (color !== "") {
-        declarations.push(`text-decoration-color: ${color}`);
-    }
-    return declarations.join("; ");
+    return [
+        `text-decoration-line: ${resolveLine(position)}`,
+        `text-decoration-style: ${style}`,
+        `text-decoration-color: ${color === "" ? FOLLOW_COLOR_KEYWORD : color}`,
+    ].join("; ");
 };
 
 /**

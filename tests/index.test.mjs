@@ -672,6 +672,31 @@ test("面板外的按下与点击仍然关闭面板", () => {
     assert.equal(f.panelElement(), null, "面板外的点击关闭面板");
 });
 
+test("通过面板选择「跟随文字颜色」，落盘的块 HTML 带 text-decoration-color: currentColor", async () => {
+    // 实测：省略这条声明时思源改存一条 color，装饰取到的就成了文字色本身
+    const f = createFixture();
+    f.plugin.onload();
+    f.clickToolbarItem();
+    f.click(f.colorSwatchOf("underline", "#46a758"));
+    await settle();
+    assert.ok(f.posts[0].data.data.includes("text-decoration-color: #46a758"), "先落一个具体颜色");
+
+    f.click(f.followSwatchOf("underline"));
+    await settle();
+    const last = f.posts[f.posts.length - 1];
+    assert.equal(last.data.id, BLOCK_A);
+    assert.equal(last.data.dataType, "dom");
+    assert.ok(
+        last.data.data.includes(
+            "text-decoration-line: underline; text-decoration-style: solid; text-decoration-color: currentColor",
+        ),
+        `跟随文字色必须显式落成 currentColor：${last.data.data}`,
+    );
+    // 上一版颜色不得以任何形式残留：思源存的就是这段 HTML
+    assert.equal(last.data.data.includes("#46a758"), false);
+    assert.equal(last.data.data.includes("color: #46a758"), false, "装饰色不得落成文字色 color");
+});
+
 test("对照组：表格单元格里连续改两次设置，两次都落到文档上", async () => {
     const f = createFixture({blocks: TABLE_HTML});
     f.plugin.onload();

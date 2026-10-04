@@ -159,15 +159,28 @@ test("composePair nests overline outermost when only the styles differ", () => {
 
 // ---------------------------------------------------------------- buildDecorationCSS
 
-test("buildDecorationCSS omits text-decoration-color entirely when the color is empty", () => {
+test("buildDecorationCSS 跟随文字色时显式写出 currentColor", () => {
+    // 实测：省略这条声明时思源改存一条 color，装饰因此取到的是文字色而不是「跟随」
     const css = buildDecorationCSS({enabled: true, style: "wavy", color: ""}, "underline");
-    assert.ok(!css.includes("text-decoration-color"), `跟随文字色必须靠省略实现：${css}`);
-    assert.equal(css, "text-decoration-line: underline; text-decoration-style: wavy");
+    assert.ok(
+        css.includes("text-decoration-color: currentColor"),
+        `跟随文字色必须显式写成 currentColor：${css}`,
+    );
+    assert.equal(
+        css,
+        "text-decoration-line: underline; text-decoration-style: wavy; text-decoration-color: currentColor",
+    );
 });
 
 test("buildDecorationCSS writes a whitelisted color verbatim", () => {
     const css = buildDecorationCSS({enabled: true, style: "solid", color: "#e5484d"}, "underline");
     assert.ok(css.includes("text-decoration-color: #e5484d"));
+});
+
+test("buildDecorationCSS 具体颜色原样落盘，不被换成 currentColor", () => {
+    const css = buildDecorationCSS({enabled: true, style: "wavy", color: "#46a758"}, "underline");
+    assert.equal(css.includes("text-decoration-color: #46a758"), true, `具体颜色必须原样写出：${css}`);
+    assert.equal(css.includes("currentColor"), false, `具体颜色不得被替换成 currentColor：${css}`);
 });
 
 test("buildDecorationCSS emits both lines when position is both", () => {
@@ -185,9 +198,13 @@ test("buildDecorationCSS always writes line before style before color", () => {
 });
 
 test("buildDecorationCSS drops a color that fails the whitelist", () => {
-    // 颜色会落进持久化的文档 HTML，非法值必须在写入前就被丢掉
+    // 颜色会落进持久化的文档 HTML，非法值必须在写入前就被丢掉；丢掉之后这份装饰就是跟随文字色
     const css = buildDecorationCSS({enabled: true, style: "solid", color: "red;position:fixed"}, "underline");
-    assert.equal(css, "text-decoration-line: underline; text-decoration-style: solid");
+    assert.equal(css.includes("position:fixed"), false, `注入的第二条声明不得出现：${css}`);
+    assert.equal(
+        css,
+        "text-decoration-line: underline; text-decoration-style: solid; text-decoration-color: currentColor",
+    );
 });
 
 test("buildDecorationCSS falls back to solid when the line style is not a known keyword", () => {
@@ -222,10 +239,38 @@ test("sanitizeColor returns whitelisted colors verbatim", () => {
     }
 });
 
-test("sanitizeColor rejects the literal currentColor keyword", () => {
-    // 跟随文字颜色靠省略 text-decoration-color 实现，不能把 currentColor 字面量写进 inline style
-    assert.equal(sanitizeColor("currentColor"), "");
-    assert.equal(isValidColor("currentColor"), false);
+test("颜色白名单接受 currentColor 关键字，且只接受它单独出现", () => {
+    // 跟随文字颜色靠 text-decoration-color: currentColor 落在文档里，因此这个关键字本身必须合法
+    for (const value of ["currentColor", "currentcolor", "CURRENTCOLOR"]) {
+        assert.equal(isValidColor(value), true, `跟随文字色是合法颜色值：${value}`);
+        // 模型内只用空串表示跟随，字面量只活在写进文档的那一条声明里
+        assert.equal(sanitizeColor(value), "", `模型内的跟随文字色是空串：${value}`);
+    }
+    // 复合写法一律拒绝：值会落进持久化的文档 HTML，多带一个 token 就能拼出第二条声明
+    for (
+        const value of [
+            "currentColor; color:url(evil)",
+            "currentColor #fff",
+            "currentColor currentColor",
+            " currentColor",
+            "currentColor ",
+            "currentColou",
+            "url(currentColor)",
+            "var(--currentColor)",
+            "red",
+            "var(--x)",
+            "red;position:fixed",
+            "url(evil)",
+        ]
+    ) {
+        assert.equal(isValidColor(value), false, `必须判定为非法：${value}`);
+        assert.equal(sanitizeColor(value), "", `必须退回跟随文字色：${value}`);
+    }
+    // 十六进制与思源主题变量仍然照旧放行
+    for (const value of ["#fff", "#ffffff", "#ffffff80", "var(--b3-font-color8)"]) {
+        assert.equal(isValidColor(value), true, `必须继续放行：${value}`);
+        assert.equal(sanitizeColor(value), value);
+    }
 });
 
 test("sanitizeColor rejects values that are not strings", () => {
@@ -320,6 +365,15 @@ test("sanitizePair keeps valid fields and still sanitizes the color", () => {
     });
 });
 
+test("sanitizePair 把 currentColor 归一成模型里的跟随文字色", () => {
+    const pair = sanitizePair({
+        underline: {enabled: true, style: "wavy", color: "currentColor"},
+        overline: {enabled: true, style: "solid", color: "currentcolor"},
+    });
+    assert.equal(pair.underline.color, "", "读回的 currentColor 归一成空串，面板与落盘配置里不再有字面量");
+    assert.equal(pair.overline.color, "");
+});
+
 test("sanitizePair returns fresh objects so callers cannot corrupt DEFAULT_PAIR", () => {
     // 这里必须用未经 wrap 的导出：wrap 里的 toHost 会克隆返回值，那样就测不到「按引用返回」了
     const pair = model.sanitizePair(null);
@@ -376,6 +430,16 @@ test("parseDecorationStyle enables a direction only when the CSS declares that l
     assert.equal(parseDecorationStyle("text-decoration-line: underline", "both").enabled, true);
 });
 
+test("parseDecorationStyle 把 currentColor 读成跟随文字色", () => {
+    // 文档里的 span 可能带着显式的 currentColor：读回来必须是跟随，面板才会选中「跟随文字色」
+    const explicit =
+        "text-decoration-line: underline; text-decoration-style: wavy; text-decoration-color: currentColor";
+    assert.deepEqual(parseDecorationStyle(explicit, "underline"), {enabled: true, style: "wavy", color: ""});
+    // 简写里的大小写写法同样归到跟随
+    const shorthand = "text-decoration: underline wavy currentcolor";
+    assert.deepEqual(parseDecorationStyle(shorthand, "underline"), {enabled: true, style: "wavy", color: ""});
+});
+
 test("parseDecorationStyle ignores declarations hidden inside quoted or parenthesised values", () => {
     // 直接 split(";") 会把引号与圆括号里的分号当成分隔符，从而让值里伪装的声明混入解析结果。
     const quotedColor = parseDecorationStyle(
@@ -407,6 +471,26 @@ test("parseDecorationStyle ignores declarations hidden inside quoted or parenthe
 test("round-trip: both directions disabled", () => {
     const pair = offPair();
     assert.deepEqual(roundTrip(pair), pair);
+});
+
+test("round-trip: 跟随文字颜色写出再读回来仍是跟随", () => {
+    const follow = {enabled: true, style: "wavy", color: ""};
+    // 写出侧必须带 currentColor 声明：这是思源不把它换成 color 的唯一办法
+    const css = buildDecorationCSS(follow, "underline");
+    assert.ok(css.includes("text-decoration-color: currentColor"), `写出侧要显式声明：${css}`);
+    const read = readPairFromStyle(css, null);
+    // 读回来既不能是某个默认颜色，也不能是「未启用」
+    assert.deepEqual(read.underline, follow);
+    assert.equal(read.underline.color, "", "跟随状态不能退化成某个具体颜色");
+    assert.equal(read.underline.enabled, true);
+    assert.deepEqual(read.overline, OFF, "没声明的方向仍然关闭");
+});
+
+test("round-trip: 具体颜色写出再读回来不变", () => {
+    const explicit = {enabled: true, style: "wavy", color: "#46a758"};
+    const css = buildDecorationCSS(explicit, "underline");
+    assert.ok(css.includes("text-decoration-color: #46a758"));
+    assert.deepEqual(readPairFromStyle(css, null).underline, explicit);
 });
 
 test("round-trip: underline only", () => {
@@ -458,6 +542,25 @@ test("readPairFromStyle reports both directions disabled when there is no style 
 });
 
 // ---------------------------------------------------------------- isSamePair
+
+test("isSamePair 把跟随文字色当成一种颜色状态", () => {
+    const follow = {
+        underline: {enabled: true, style: "wavy", color: ""},
+        overline: {enabled: false, style: "solid", color: ""},
+    };
+    assert.equal(isSamePair(follow, structuredClone(follow)), true, "两个跟随状态相等");
+    // currentColor 与空串说的是同一件事，读回的声明与面板里的空串不该被当成一次改动
+    assert.equal(
+        isSamePair(follow, {...follow, underline: {...follow.underline, color: "currentColor"}}),
+        true,
+        "currentColor 写法与空串是同一个状态",
+    );
+    assert.equal(
+        isSamePair(follow, {...follow, underline: {...follow.underline, color: "#46a758"}}),
+        false,
+        "跟随与具体颜色不是同一个状态",
+    );
+});
 
 test("isSamePair compares both directions and every field of each", () => {
     const base = {
