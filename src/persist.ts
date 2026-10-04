@@ -64,13 +64,19 @@ const changeStack: IChangeEntry[] = [];
  */
 export const findBlockElement = (blockId: string): HTMLElement | null => {
     const blocks = document.querySelectorAll(`[${NODE_ID_ATTRIBUTE}]`);
+    let fallback: HTMLElement | null = null;
     for (let i = 0; i < blocks.length; i++) {
         const element = blocks[i];
-        if (element.getAttribute(NODE_ID_ATTRIBUTE) === blockId) {
+        if (element.getAttribute(NODE_ID_ATTRIBUTE) !== blockId) {
+            continue;
+        }
+        // 面包屑等处也带同名 data-node-id，编辑区里的那个才是块本身：先认它，认不到再退回第一个
+        if (element.closest(".protyle-wysiwyg") !== null) {
             return element as HTMLElement;
         }
+        fallback = fallback ?? (element as HTMLElement);
     }
-    return null;
+    return fallback;
 };
 
 /**

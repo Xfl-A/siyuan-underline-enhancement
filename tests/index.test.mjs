@@ -7,10 +7,7 @@ import {JSDOM} from "jsdom";
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import test from "node:test";
-import {
-    loadModule,
-    toHost,
-} from "./helpers/loadModule.mjs";
+import {loadModule} from "./helpers/loadModule.mjs";
 
 // 直接读真实的语言文件：插件实际用到的每个键都要在这里有非空的文案
 const readLocale = (locale) => JSON.parse(readFileSync(new URL(`../src/i18n/${locale}.json`, import.meta.url), "utf8"));
@@ -115,12 +112,16 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 /**
  * 一个用例一套独立的 jsdom、独立的模块实例与独立的思源桩。
- * 撤销栈与「记住的上次配置」都是模块级 / 实例级状态，共享实例会让用例互相依赖。
+ * 撤销栈是模块级、面板状态是实例级的，共享实例会让用例互相依赖。
  */
 const createFixture = (options = {}) => {
     const blocks = options.blocks ?? SINGLE_BLOCK_HTML;
     const dom = new JSDOM(
         '<!DOCTYPE html><html><body><div class="fn__toolbar" id="anchor"></div>' +
+            // 面包屑也带 data-node-id，且与块 id 相同：真实思源里它排在编辑区之前，用来钉住「别认错节点」
+            '<div class="protyle-breadcrumb">' +
+            `<span class="protyle-breadcrumb__item" data-node-id="${BLOCK_A}"></span>` +
+            `<span class="protyle-breadcrumb__item" data-node-id="${BLOCK_B}"></span></div>` +
             '<div class="protyle-wysiwyg" id="editor"></div></body></html>',
         {pretendToBeVisual: true},
     );
@@ -243,13 +244,18 @@ const createFixture = (options = {}) => {
     const plugin = new indexModule.default();
 
     /** 造一个思源形态的 protyle：工具栏项的 click 收到的是 Protyle 类实例，浮动工具栏在它的 .protyle 上 */
-    const protyleOf = (range) => {
+    const protyleOf = (range, options = {}) => {
         const toolbar = {
             element: document.getElementById("anchor"),
             range,
             subElementCloseCB: () => {},
         };
-        return {protyle: {element: document.getElementById("editor"), toolbar}, toolbar};
+        const protyle = {element: document.getElementById("editor"), toolbar};
+        // 真机上前端连着内核 WebSocket 才会收到块事务回放；用例按需打开，以覆盖回放后重落选区那条路
+        if (options.ws === true) {
+            protyle.ws = {};
+        }
+        return {protyle, toolbar};
     };
 
     // 偏移换算在测试侧独立写一遍：复用被测代码的同一段逻辑会让断言变成自证。
@@ -289,7 +295,7 @@ const createFixture = (options = {}) => {
     /** 单个元素内 [start, end) 字符偏移的选区 */
     const offsetRange = (element, start, end) => rangeBetween(element, start, element, end);
 
-    const block = (blockId) => document.querySelector(`[data-node-id="${blockId}"]`);
+    const block = (blockId) => document.getElementById("editor").querySelector(`[data-node-id="${blockId}"]`);
     const blockHTML = (blockId) => block(blockId).outerHTML;
     /** 默认选区：整段选中唯一的那个块 */
     const singleRange = () => {
@@ -417,9 +423,8 @@ const createFixture = (options = {}) => {
     /**
      * 再点一次工具栏图标把面板重新打开。
      *
-     * 设置类控件不再收面板，因此面板开着时点它等于什么都不做；真正需要重新打开的是
-     * 终止类控件（清除装饰、撤销、原生取色器）之后。选区要重新造：文档已经被改过，
-     * 上一次的 Range 早已失效。
+     * 设置类控件点了就收面板，因此一次会话里往往要来回重开。选区要重新造：
+     * 文档已经被改过，上一次的 Range 早已失效。
      */
     const reopen = (rangeFactory = singleRange) => clickToolbarItem(protyleOf(rangeFactory()));
 
@@ -459,7 +464,7 @@ const createFixture = (options = {}) => {
         rerender,
         shrinkBlock,
         removeBlock,
-        // 白盒地收面板：设置类控件不再收面板，多步交互之间要换一次面板时用它
+        // 白盒地收面板：多步交互之间要换一次面板时用它
         closePanel: () => plugin.closePanel(),
         requestedI18NKeys: () => [...new Set(requestedI18NKeys)],
         respondWith: (...queued) => {
@@ -562,9 +567,9 @@ test("点击工具栏项创建带 data-sue-panel 的面板，并接管浮动工�
 
 // ------------------------------------------------------------------ 面板与浮动工具栏各收各的
 
-test("点面板里的控件只动面板自己：浮动工具栏留在原地，回调还回思源", () => {
-    // 浮动工具栏与面板是各自独立的：设置类控件不收面板，工具栏更是任何情况下都不由面板收。
-    // 反过来做（面板一直挂着、等工具栏收起）会让工具栏被误伤，用户的下一次选择就没了
+test("点面板里的控件收面板，但不动浮动工具栏，收摊时把回调还回思源", () => {
+    // 设置类控件点一下就完成一次设置，面板随之收起，与思源自己的颜色菜单一致；
+    // 浮动工具栏与选区留给用户，下一次要改重新点工具栏图标即可。工具栏任何情况下都不由面板收
     const f = createFixture();
     f.plugin.onload();
     const protyle = f.protyleOf(f.singleRange());
@@ -573,14 +578,9 @@ test("点面板里的控件只动面板自己：浮动工具栏留在原地，�
 
     f.click(f.styleSwatchOf("underline", "wavy"));
 
-    assert.ok(f.panelElement(), "设置类控件不收面板：用户还要接着调颜色与线型");
+    assert.equal(f.panelElement(), null, "设置类控件点一下就收面板");
     assert.ok(protyle.toolbar.element.isConnected, "浮动工具栏仍然挂在文档里，没有被收走");
-    assert.equal(f.plugin.toolbar, protyle.toolbar, "插件仍持有工具栏：它之后怎么收起都与插件无关");
-
-    // 面板收掉时把思源原来的回调还回去，别把插件的回调留在它的对象上
-    f.click(f.document.getElementById("editor"));
-    assert.equal(f.panelElement(), null, "面板外的点击收面板");
-    assert.equal(protyle.toolbar.subElementCloseCB, originalCloseCB, "回调已经还给思源");
+    assert.equal(protyle.toolbar.subElementCloseCB, originalCloseCB, "收面板时把回调还给了思源");
 });
 
 test("收面板不经过浮动工具栏的关闭回调这条路", () => {
@@ -600,10 +600,6 @@ test("收面板不经过浮动工具栏的关闭回调这条路", () => {
     };
 
     f.click(f.styleSwatchOf("underline", "wavy"));
-    assert.equal(viaToolbar, 0, "面板还开着，工具栏那条路当然不该被走");
-    assert.ok(f.panelElement());
-
-    f.click(f.actionButton("clear"));
 
     assert.equal(viaToolbar, 0, "收面板走的是面板自己的出口，不是工具栏的关闭回调");
     assert.equal(f.panelElement(), null, "面板确实收掉了");
@@ -672,15 +668,16 @@ test("原生取色器挑完颜色：装饰照常落盘，选区清空，浮动�
     assert.equal(protyle.toolbar.element.contains(outsidePresses[0]), false, "那次按下不在工具栏里");
 });
 
-test("预设色块不碰浮动工具栏：选区留着，面板与工具栏都留着", () => {
-    // 只有取色器那一条路会连选区带浮动工具栏一起收；其余控件必须把这两样都留给用户
+test("预设色块不碰浮动工具栏：选区留着，工具栏留着，面板收起", () => {
+    // 只有取色器那一条路会连选区带浮动工具栏一起收；其余控件必须把这两样都留给用户，
+    // 只收起自己的面板
     const f = createFixture();
     f.plugin.onload();
     const protyle = f.protyleOf(f.singleRange());
     f.clickToolbarItem(protyle);
     f.click(f.styleSwatchOf("underline", "wavy"));
 
-    assert.ok(f.panelElement(), "设置类控件不收面板");
+    assert.equal(f.panelElement(), null, "设置类控件点一下就收面板");
     assert.ok(f.document.getSelection().rangeCount > 0, "选区必须留着");
     assert.ok(protyle.toolbar.element.isConnected);
 });
@@ -714,7 +711,6 @@ test("面板外的点击仍然关闭面板", () => {
 test("打开面板时选区里没有下划线：默认装饰真的落到文档上，并恰好发一次 updateBlock", async () => {
     const f = createFixture();
     f.plugin.onload();
-    await f.plugin.onLayoutReady();
     f.clickToolbarItem(f.protyleOf(f.singleRange()));
 
     // 面板摆出来的那一份，就是刚被应用的那一份：默认实线 + 跟随文字颜色
@@ -742,7 +738,6 @@ test("打开面板时选区里没有下划线：默认装饰真的落到文档�
 test("打开面板时选区里已经有下划线：只显示设置，文档一个字节都不动", async () => {
     const f = createFixture({blocks: DECORATED_HTML});
     f.plugin.onload();
-    await f.plugin.onLayoutReady();
     const before = f.blockHTML(BLOCK_A);
     f.clickToolbarItem(f.protyleOf(f.singleRange()));
     await settle();
@@ -763,7 +758,6 @@ test("选区里的装饰不一致时，打开面板同样一个字节都不动",
         `<p data-type="text" data-node-id="${BLOCK_B}">${savedDecoration(SAVED_WAVY_RED, "world")}</p>`;
     const f = createFixture({blocks: html});
     f.plugin.onload();
-    await f.plugin.onLayoutReady();
     f.clickToolbarItem(f.protyleOf(f.crossRange()));
     await settle();
 
@@ -778,7 +772,6 @@ test("思源自己的 <u> 在打开面板时被脱掉，换成插件自己的下
     const html = `<p data-type="text" data-node-id="${BLOCK_A}">plain ${nativeUnderline("under")} tail</p>`;
     const f = createFixture({blocks: html});
     f.plugin.onload();
-    await f.plugin.onLayoutReady();
     f.clickToolbarItem(f.protyleOf(f.singleRange()));
 
     // <u> 让位：同一段文字上只能有一条下划线，而插件的这条是面板能调的
@@ -803,7 +796,6 @@ test("只有落在选区里的 <u> 被脱掉，同一块里其余位置的 <u> �
     // "one " 覆盖 [0, 4)：两个 <u> 都在它之外
     const outside = createFixture({blocks: marked});
     outside.plugin.onload();
-    await outside.plugin.onLayoutReady();
     outside.clickToolbarItem(outside.protyleOf(outside.offsetRange(outside.block(BLOCK_A), 0, 4)));
 
     assert.equal(outside.block(BLOCK_A).querySelectorAll("u").length, 2, "选区之外的 <u> 一个都不许动");
@@ -820,7 +812,6 @@ test("只有落在选区里的 <u> 被脱掉，同一块里其余位置的 <u> �
     // 选区落在 "three " 上（[8, 14)），同样一个 <u> 都碰不到
     const middle = createFixture({blocks: marked});
     middle.plugin.onload();
-    await middle.plugin.onLayoutReady();
     middle.clickToolbarItem(middle.protyleOf(middle.offsetRange(middle.block(BLOCK_A), 8, 14)));
     const survivors = Array.from(middle.block(BLOCK_A).querySelectorAll("u")).map((element) => element.textContent);
     assert.deepEqual(survivors, ["two", "four"], "两个 <u> 都原样留着，一个字都没动");
@@ -833,7 +824,6 @@ test("另一个块里的 <u> 完全不在作用域内", async () => {
         `<p data-type="text" data-node-id="${BLOCK_B}">other ${nativeUnderline("mark")}</p>`;
     const f = createFixture({blocks: html});
     f.plugin.onload();
-    await f.plugin.onLayoutReady();
     f.clickToolbarItem(f.protyleOf(f.singleRange()));
     await settle();
 
@@ -850,7 +840,6 @@ test("<u> 只覆盖选区的一部分时整条脱掉，缺掉的那半截由插�
     const html = `<p data-type="text" data-node-id="${BLOCK_A}">ab ${nativeUnderline("cdef")} gh</p>`;
     const f = createFixture({blocks: html});
     f.plugin.onload();
-    await f.plugin.onLayoutReady();
     f.clickToolbarItem(f.protyleOf(f.offsetRange(f.block(BLOCK_A), 0, 5)));
 
     assert.equal(f.block(BLOCK_A).querySelectorAll("u").length, 0, "与选区相交的 <u> 整条脱掉");
@@ -865,7 +854,6 @@ test("思源的 <u> 与插件装饰同时存在：<u> 让位，插件那份装�
         `${savedDecoration(SAVED_WAVY_RED, "plugin")} tail</p>`;
     const f = createFixture({blocks: html});
     f.plugin.onload();
-    await f.plugin.onLayoutReady();
     f.clickToolbarItem(f.protyleOf(f.singleRange()));
     await settle();
 
@@ -882,22 +870,26 @@ test("思源的 <u> 与插件装饰同时存在：<u> 让位，插件那份装�
     assert.equal(f.blockHTML(BLOCK_A), html);
 });
 
-test("记住的配置关着时：<u> 仍然脱掉，但不会被顺手打开下划线", async () => {
-    // 打开面板要接管这段文字的下划线，因此思源那一条一定要让位；
-    // 而「要不要把下划线打开」取决于记住的那份配置 —— 那是用户上一次关掉时的明确决定
+test("选区里没有下划线时一律用默认配置，不再沿用上次的设置", async () => {
+    // Bug 1：初次点开增强下划线，应该把下划线改成「实线 + 跟随文字色」并应用，
+    // 而不是沿用上一次用过的（这里是关掉 + wavy）。思源那一条 <u> 仍然让位。
     const html = `<p data-type="text" data-node-id="${BLOCK_A}">plain ${nativeUnderline("under")} tail</p>`;
     const f = createFixture({blocks: html, data: {[SETTINGS_FILE]: {enabled: false, style: "wavy", color: ""}}});
     f.plugin.onload();
-    await f.plugin.onLayoutReady();
     f.clickToolbarItem(f.protyleOf(f.singleRange()));
-    await settle();
 
     assert.equal(f.block(BLOCK_A).querySelectorAll("u").length, 0, "<u> 仍然脱掉");
-    assert.equal(HAS_DECORATION_SPAN.test(f.blockHTML(BLOCK_A)), false, "但没有装饰被铺上");
-    assert.equal(f.checkedOf("underline"), false, "开关按记住的那份配置显示为关");
-    assert.equal(f.pressed(f.styleSwatchOf("underline", "wavy")), true, "线型与颜色仍留着，打开开关即沿用");
+    assert.match(f.blockHTML(BLOCK_A), DECORATED_UNDERLINE_DEFAULT, "落笔的是默认的实线 + 跟随文字色");
+    assert.equal(f.checkedOf("underline"), true, "开关显示为开");
+    assert.equal(f.pressed(f.followSwatchOf("underline")), true, "颜色显示为跟随文字色");
     assert.equal(f.block(BLOCK_A).textContent, "plain under tail");
-    // 脱 <u> 与记下的改动合成一条：按一次撤销就把 <u> 放回去
+    // 存储里的那份 wavy 配置一个字都不该被读出来用上
+    assert.equal(f.posts.length, 0, "落笔还在防抖窗口里，此刻没有落盘");
+    await settle();
+    assert.equal(f.posts.length, 1);
+    assert.match(f.posts[0].data.data, DECORATED_UNDERLINE_DEFAULT);
+    // 脱 <u> 与落笔合成一条：按一次撤销就把 <u> 放回去
+    f.reopen();
     f.click(f.actionButton("undo"));
     await tick();
     assert.equal(f.blockHTML(BLOCK_A), html);
@@ -908,7 +900,6 @@ test("打开面板时记下的偏移已经越界：整次放弃，不落盘并�
     // 夹具在 applyDecoration 入口处把块换短，模拟思源在记下偏移与应用之间重渲染了块
     const f = createFixture();
     f.plugin.onload();
-    await f.plugin.onLayoutReady();
     const apply = f.plugin.applyDecoration;
     f.plugin.applyDecoration = function(decoration, options) {
         // 面板还没建起来 ⇒ 这一次就是打开面板时的落笔
@@ -928,31 +919,29 @@ test("打开面板时记下的偏移已经越界：整次放弃，不落盘并�
     assert.ok(f.panelElement());
 });
 
-test("面板开着把下划线关掉再打开：两次都真的落到文档上，各发一次 updateBlock", async () => {
-    // 「从未打开到打开」这一段必须落笔，不能只翻面板内部的开关 ——
-    // 否则用户看到的是开关亮着而文档里什么都没有
+test("把下划线关掉之后重新打开：默认配置真的铺回选区并落盘", async () => {
+    // 关掉是一次真实改动：装饰从文档里去掉。之后重新打开面板时选区已无装饰，
+    // 因此按 Bug 1 的约定落的是默认配置（实线 + 跟随文字色）
     const f = createFixture({blocks: DECORATED_TWO_BLOCKS_HTML});
     f.plugin.onload();
-    await f.plugin.onLayoutReady();
     f.clickToolbarItem(f.protyleOf(f.crossRange()));
 
     f.click(f.switchOf("underline"));
     assert.equal(HAS_DECORATION_SPAN.test(f.blockHTML(BLOCK_A)), false, "关掉之后装饰真的没了");
-    assert.equal(f.checkedOf("underline"), false);
-    // 这次落盘必须真的发出去，不能一直躺在防抖窗口里
+    // 收面板时会把这次改动立刻发出去，不能一直躺在防抖窗口里
     await settle();
     assert.deepEqual(f.posts.map((post) => post.data.id), [BLOCK_A, BLOCK_B], "关掉一次，各块各发一次");
 
-    f.click(f.switchOf("underline"));
-    assert.ok(f.blockHTML(BLOCK_A).includes(SAVED_WAVY_RED), "再打开又把装饰铺回选区");
-    assert.ok(f.blockHTML(BLOCK_B).includes(SAVED_WAVY_RED));
+    f.reopen(f.crossRange);
+    assert.match(f.blockHTML(BLOCK_A), DECORATED_UNDERLINE_DEFAULT, "重新打开时落的是默认配置");
+    assert.match(f.blockHTML(BLOCK_B), DECORATED_UNDERLINE_DEFAULT);
     assert.equal(f.checkedOf("underline"), true);
 
     await settle();
     assert.deepEqual(
         f.posts.map((post) => post.data.id),
         [BLOCK_A, BLOCK_B, BLOCK_A, BLOCK_B],
-        "再打开一次，各块各发一次",
+        "重新打开一次，各块各发一次",
     );
 });
 
@@ -970,7 +959,8 @@ test("跨两段应用后按一次撤销就把两段一起退回", async () => {
     // 用户这一次操作跨两个块，每个块各发一次
     assert.deepEqual(f.posts.map((post) => post.data.id), [BLOCK_A, BLOCK_B]);
 
-    // 撤销栈必须活得比面板久：设置类控件不收面板，重新打开仍能撤掉刚才那一次改动
+    // 设置类控件点了就收面板；重新打开仍能撤掉刚才那一次改动（撤销栈活得比面板久）
+    f.reopen(f.crossRange);
     const undo = f.actionButton("undo");
     assert.equal(undo.getAttribute("aria-disabled"), null, "有东西可撤销时撤销键是可用的");
     f.click(undo);
@@ -1032,25 +1022,6 @@ test("选区内的装饰一致时不显示混合提示", () => {
     assert.equal(f.pressed(f.styleSwatchOf("underline", "wavy")), true);
 });
 
-test("记住的配置本身是关着时，选区里没有装饰，按清除装饰不发请求", async () => {
-    // 记住的配置关着 ⇒ 打开面板不落笔（那是用户上一次的明确决定），因此「清除」面前确实没有装饰可清。
-    // 走这一条分支，「清除不产生请求」才真的成立：面板开着期间选区已经被默认装饰铺过一遍了
-    const f = createFixture({data: {[SETTINGS_FILE]: {enabled: false, style: "solid", color: ""}}});
-    f.plugin.onload();
-    await f.plugin.onLayoutReady();
-    f.clickToolbarItem(f.protyleOf(f.singleRange()));
-    assert.deepEqual(f.posts, [], "打开面板本身不该写文档");
-    assert.equal(f.checkedOf("underline"), false, "记住的正是关掉时的那份配置");
-    assert.equal(f.blockHTML(BLOCK_A), SINGLE_BLOCK_HTML, "文档一个字节都不动");
-
-    f.click(f.actionButton("clear"));
-    await settle();
-
-    // 文档本来就没有装饰，这次「清除」什么都没改：发一个逐字节相同的块只是白写一次
-    assert.deepEqual(f.posts, [], "没有实际改动时不该有 updateBlock");
-    assert.deepEqual(f.calls.messages, []);
-});
-
 test("面板里的改动落到选区上，跨块时每个块各发一次 updateBlock", async () => {
     const f = createFixture({blocks: DECORATED_TWO_BLOCKS_HTML});
     f.plugin.onload();
@@ -1085,7 +1056,6 @@ test("插件用到的每个 i18n 键在两种语言的真实文件里都存在",
     const f = createFixture();
     f.respondWith(FAILED_RESPONSE);
     f.plugin.onload();
-    await f.plugin.onLayoutReady();
     f.clickToolbarItem(f.protyleOf(f.singleRange()));
     f.click(f.styleSwatchOf("underline", "wavy"));
     await settle();
@@ -1125,28 +1095,21 @@ test("清除装饰去掉下划线", async () => {
     assert.equal(HAS_DECORATION_SPAN.test(f.posts[f.posts.length - 1].data.data), false);
 });
 
-test("关掉再打开下划线时沿用它上次的线型与颜色", () => {
+test("关掉下划线之后重新打开：选区已无装饰，面板回到默认配置", () => {
     const f = createFixture({blocks: DECORATED_HTML});
     f.plugin.onload();
     f.clickToolbarItem(f.protyleOf(f.singleRange()));
-    const wavy = f.styleSwatchOf("underline", "wavy");
     f.click(f.switchOf("underline"));
-    // 装饰整个去掉，线型与颜色仍留在面板上
+    // 装饰整个去掉，面板随之收起
     assert.equal(HAS_DECORATION_SPAN.test(f.blockHTML(BLOCK_A)), false);
-    assert.equal(f.pressed(wavy), true);
+    assert.equal(f.panelElement(), null);
 
-    // 文档里已经没有装饰，面板因此回到上次用过的那一份 —— 正是刚关掉时的线型与颜色
+    // 文档里已经没有装饰，重新打开时按约定落回默认配置
     f.reopen();
-    assert.equal(f.checkedOf("underline"), false, "记住的正是关掉时的那份配置");
-    assert.equal(f.pressed(f.styleSwatchOf("underline", "wavy")), true);
-    assert.equal(f.pressed(f.colorSwatchOf("underline", "#e5484d")), true);
-
-    f.click(f.switchOf("underline"));
-    assert.match(f.blockHTML(BLOCK_A), DECORATED_UNDERLINE, "再打开就沿用上次的线型");
-    assert.ok(
-        f.blockHTML(BLOCK_A).includes("text-decoration-color: #e5484d"),
-        "颜色也一并沿用",
-    );
+    assert.equal(f.checkedOf("underline"), true, "默认就是开着");
+    assert.equal(f.pressed(f.styleSwatchOf("underline", "solid")), true);
+    assert.equal(f.pressed(f.followSwatchOf("underline")), true);
+    assert.match(f.blockHTML(BLOCK_A), DECORATED_UNDERLINE_DEFAULT);
 });
 
 test("通过面板选择「跟随文字颜色」，落盘的块 HTML 带 text-decoration-color: currentColor", async () => {
@@ -1244,7 +1207,6 @@ test("callout 标题区撤销之后再改设置，装饰仍然落在标题上", 
 test("重渲染之后下划线的第二次线型改动仍然落到活着的块上，并各发一次 updateBlock", async () => {
     const f = createFixture({blocks: TWO_BLOCKS_HTML});
     f.plugin.onload();
-    await f.plugin.onLayoutReady();
     f.clickToolbarItem(f.protyleOf(f.crossRange()));
     f.click(f.styleSwatchOf("underline", "wavy"));
     await settle();
@@ -1269,7 +1231,6 @@ test("重渲染之后下划线的第二次线型改动仍然落到活着的块�
 test("重渲染之后下划线的第二次颜色改动仍然落到活着的块上，并各发一次 updateBlock", async () => {
     const f = createFixture({blocks: TWO_BLOCKS_HTML});
     f.plugin.onload();
-    await f.plugin.onLayoutReady();
     f.clickToolbarItem(f.protyleOf(f.crossRange()));
     f.click(f.styleSwatchOf("underline", "wavy"));
     await settle();
@@ -1292,7 +1253,6 @@ test("重渲染之后下划线的第二次颜色改动仍然落到活着的块�
 test("重渲染之后清除装饰，活着的块上不再有装饰", async () => {
     const f = createFixture({blocks: TWO_BLOCKS_HTML});
     f.plugin.onload();
-    await f.plugin.onLayoutReady();
     f.clickToolbarItem(f.protyleOf(f.crossRange()));
     f.click(f.styleSwatchOf("underline", "wavy"));
     await settle();
@@ -1312,10 +1272,9 @@ test("重渲染之后清除装饰，活着的块上不再有装饰", async () =>
     assert.equal(HAS_DECORATION_SPAN.test(f.posts[3].data.data), false);
 });
 
-test("重渲染之后关掉再打开下划线，改动仍然落到活着的块上", async () => {
+test("重渲染之后关掉再重新打开，默认配置仍然落到活着的块上", async () => {
     const f = createFixture({blocks: TWO_BLOCKS_HTML});
     f.plugin.onload();
-    await f.plugin.onLayoutReady();
     f.clickToolbarItem(f.protyleOf(f.crossRange()));
     f.click(f.styleSwatchOf("underline", "wavy"));
     await settle();
@@ -1327,15 +1286,13 @@ test("重渲染之后关掉再打开下划线，改动仍然落到活着的块�
     assert.equal(HAS_DECORATION_SPAN.test(f.blockHTML(BLOCK_A)), false, "关掉之后装饰真的没了");
 
     f.reopen(f.crossRange);
-    f.click(f.switchOf("underline"));
-    assert.match(f.blockHTML(BLOCK_A), DECORATED_UNDERLINE, "再打开又沿用上次的线型");
-    assert.match(f.blockHTML(BLOCK_B), DECORATED_UNDERLINE);
+    assert.match(f.blockHTML(BLOCK_A), DECORATED_UNDERLINE_DEFAULT, "重新打开时落的是默认配置");
+    assert.match(f.blockHTML(BLOCK_B), DECORATED_UNDERLINE_DEFAULT);
 });
 
 test("重渲染之后重建的选区落在活着的文档上，而不是脱管的那一份里", async () => {
     const f = createFixture({blocks: TWO_BLOCKS_HTML});
     f.plugin.onload();
-    await f.plugin.onLayoutReady();
     f.clickToolbarItem(f.protyleOf(f.crossRange()));
     f.click(f.styleSwatchOf("underline", "wavy"));
     // 换掉的节点把插件记下的块元素、可编辑区域与选区坐标一并带走了
@@ -1352,10 +1309,45 @@ test("重渲染之后重建的选区落在活着的文档上，而不是脱管�
     assert.ok(f.block(BLOCK_B).contains(selection.focusNode), "终点要落在活着的第二段里");
 });
 
+test("内核回放替换掉块节点之后，选区自动落回同一段文字", async () => {
+    // 真机上落盘会让内核把更新事务回放回前端，回放时整块节点被换掉、选区随之丢失。
+    // 夹具用 ws 标记出「连了内核」，再用 rerender 模拟这次替换
+    const f = createFixture();
+    f.plugin.onload();
+    f.clickToolbarItem(f.protyleOf(f.singleRange(), {ws: true}));
+    f.click(f.styleSwatchOf("underline", "wavy"));
+    // 面板收起后选区还在
+    assert.equal(f.document.getSelection().toString(), "hello");
+
+    // 内核回放：整块被一份新的替换掉，选区此前已丢失
+    f.rerender(BLOCK_A);
+    f.document.getSelection()?.removeAllRanges();
+    await tick();
+
+    const selection = f.document.getSelection();
+    assert.ok(selection.rangeCount > 0, "回放换块之后选区必须自动落回来");
+    assert.equal(selection.toString(), "hello", "落回的是同一段文字");
+    assert.ok(f.block(BLOCK_A).contains(selection.anchorNode), "落点在新块里");
+});
+
+test("回放重落不抢用户的新选择：块被换掉但用户已经选了别处", async () => {
+    const f = createFixture({blocks: TWO_BLOCKS_HTML});
+    f.plugin.onload();
+    f.clickToolbarItem(f.protyleOf(f.singleRange(), {ws: true}));
+    f.click(f.styleSwatchOf("underline", "wavy"));
+
+    // 用户改选了第二段，随后内核才回放第一段的替换
+    f.document.getSelection().removeAllRanges();
+    f.document.getSelection().addRange(f.offsetRange(f.block(BLOCK_B), 0, 5));
+    f.rerender(BLOCK_A);
+    await tick();
+
+    assert.equal(f.document.getSelection().toString(), "world", "用户自己的新选择必须留着");
+});
+
 test("重渲染之后的改动只写活着的块，脱管的那一份不会被改到", async () => {
     const f = createFixture({blocks: TWO_BLOCKS_HTML});
     f.plugin.onload();
-    await f.plugin.onLayoutReady();
     f.clickToolbarItem(f.protyleOf(f.crossRange()));
     f.click(f.styleSwatchOf("underline", "wavy"));
     await settle();
@@ -1390,7 +1382,6 @@ test("记下的偏移越出内容时整次放弃：文档不动、不落盘，�
     // 从已装饰的块出发：打开面板因此不落笔，这次越界的改动是会话里唯一的一次
     const f = createFixture({blocks: DECORATED_DOTTED_HTML});
     f.plugin.onload();
-    await f.plugin.onLayoutReady();
     f.clickToolbarItem(f.protyleOf(f.singleRange()));
     assert.equal(f.plugin.groups[0].end, 5, "前置条件：面板记下的偏移是 (0, 5)");
     assert.deepEqual(f.posts, [], "前置条件：打开面板本身没有写文档");
@@ -1411,7 +1402,6 @@ test("记下的偏移越出内容时整次放弃：文档不动、不落盘，�
 test("跨块选区里只有一组越界时整次放弃：另一段也不落盘", async () => {
     const f = createFixture({blocks: DECORATED_DOTTED_TWO_BLOCKS_HTML});
     f.plugin.onload();
-    await f.plugin.onLayoutReady();
     f.clickToolbarItem(f.protyleOf(f.crossRange()));
 
     // 只有第二段变短：一次操作要覆盖全部区域，因此不能只改掉仍然对得上的那一段
@@ -1430,7 +1420,6 @@ test("跨块选区里只有一组越界时整次放弃：另一段也不落盘",
 test("块被删除之后记下的坐标整次放弃：不落盘，并提示用户", async () => {
     const f = createFixture({blocks: DECORATED_DOTTED_TWO_BLOCKS_HTML});
     f.plugin.onload();
-    await f.plugin.onLayoutReady();
     f.clickToolbarItem(f.protyleOf(f.crossRange()));
     const survivingHTML = f.blockHTML(BLOCK_A);
 
@@ -1449,7 +1438,6 @@ test("块被删除之后记下的坐标整次放弃：不落盘，并提示用�
 test("记下的偏移仍然对得上时照常改动并落盘", async () => {
     const f = createFixture();
     f.plugin.onload();
-    await f.plugin.onLayoutReady();
     f.clickToolbarItem(f.protyleOf(f.singleRange()));
 
     f.click(f.styleSwatchOf("underline", "wavy"));
@@ -1490,7 +1478,8 @@ test("撤销把块换回改动前的样子", async () => {
     await settle();
     assert.match(f.blockHTML(BLOCK_A), DECORATED_UNDERLINE);
 
-    // 撤销栈必须活得比面板久：设置类控件不收面板，栈若跟着一起清空，撤销就永远按不动
+    // 设置类控件点了就收面板；重新打开仍能撤销，栈不随面板清空
+    f.reopen();
     f.click(f.actionButton("undo"));
     await tick();
     assert.ok(f.blockHTML(BLOCK_A).includes(SAVED_DOTTED_RED), "文档退回改动前的样子");
@@ -1540,66 +1529,16 @@ test("别的工具加进来的上划线按「选区里没有装饰」处理，�
     assert.equal(f.blockHTML(BLOCK_A), `<p data-type="text" data-node-id="${BLOCK_A}">hi</p>`);
 });
 
-test("loadData 读回的配置过白名单后，作为没有装饰的选区的面板初值", async () => {
-    const stored = {
-        enabled: true,
-        style: "wavy",
-        color: "#0090ff",
-    };
-    const f = createFixture({data: {[SETTINGS_FILE]: stored}});
-    f.plugin.onload();
-    await f.plugin.onLayoutReady();
-    assert.deepEqual(f.calls.loadedFiles, [SETTINGS_FILE]);
-    f.clickToolbarItem(f.protyleOf(f.singleRange()));
-    assert.equal(f.pressed(f.styleSwatchOf("underline", "wavy")), true);
-    assert.equal(f.pressed(f.colorSwatchOf("underline", "#0090ff")), true);
-});
-
-test("loadData 读回的颜色过不了白名单就退回跟随文字色", async () => {
-    const f = createFixture({
-        data: {[SETTINGS_FILE]: {enabled: true, style: "wavy", color: "red;position:fixed"}},
-    });
-    f.plugin.onload();
-    await f.plugin.onLayoutReady();
-    f.clickToolbarItem(f.protyleOf(f.singleRange()));
-    assert.equal(f.pressed(f.styleSwatchOf("underline", "wavy")), true);
-    assert.equal(f.pressed(f.followSwatchOf("underline")), true);
-});
-
-test("loadData 抛错时面板退回默认值，其余功能照常", async () => {
+test("面板的初值与 loadData 无关：没装饰就是默认配置", async () => {
     const f = createFixture({loadFails: true});
     f.plugin.onload();
-    await f.plugin.onLayoutReady();
     f.clickToolbarItem(f.protyleOf(f.singleRange()));
     assert.equal(f.checkedOf("underline"), true);
     assert.equal(f.pressed(f.styleSwatchOf("underline", "solid")), true);
+    assert.equal(f.pressed(f.followSwatchOf("underline")), true);
     f.click(f.styleSwatchOf("underline", "wavy"));
     await settle();
     assert.deepEqual(f.posts.map((post) => post.data.id), [BLOCK_A]);
-});
-
-test("关闭面板时记住上次的配置", async () => {
-    const f = createFixture();
-    f.plugin.onload();
-    await f.plugin.onLayoutReady();
-    f.clickToolbarItem(f.protyleOf(f.singleRange()));
-    f.click(f.styleSwatchOf("underline", "wavy"));
-    f.reopen();
-    f.click(f.colorSwatchOf("underline", "#e5484d"));
-    await settle();
-    // 点面板外面即关闭；面板在每次激活时也收过一次，因此每次收起都会记一份
-    f.click(f.document.getElementById("editor"));
-    assert.equal(f.panelElement(), null);
-    assert.ok(f.calls.savedFiles.length >= 1);
-    for (const file of f.calls.savedFiles) {
-        assert.equal(file.name, SETTINGS_FILE);
-    }
-    // 记下来的是最后用过的这一份
-    assert.deepEqual(toHost(f.calls.savedFiles[f.calls.savedFiles.length - 1].value), {
-        enabled: true,
-        style: "wavy",
-        color: "#e5484d",
-    });
 });
 
 test("切换文档时收起面板并清空本会话的撤销栈", async () => {
@@ -1621,18 +1560,16 @@ test("切换文档时收起面板并清空本会话的撤销栈", async () => {
     assert.equal(f.blockHTML(BLOCK_A), before, "切文档之后撤销栈已清空，再按撤销什么也不改");
 });
 
-test("卸载时把面板、未到点的保存与浮动工具栏的回调一起收掉", async () => {
+test("卸载时把面板与浮动工具栏的回调一起收掉，且不丢已落盘的改动", async () => {
     const f = createFixture();
     f.plugin.onload();
     const protyle = f.protyleOf(f.singleRange());
     const originalCloseCB = protyle.toolbar.subElementCloseCB;
     f.clickToolbarItem(protyle);
     f.click(f.styleSwatchOf("underline", "wavy"));
-    // 设置类控件不收面板，因此那一次保存还在防抖窗口里没发出去：
-    // 卸载必须先把它发出去，磁盘上不能停在改动前
-    assert.deepEqual(f.posts, [], "前置条件：保存还没到点");
+    // 设置类控件点一下就收面板，收面板时那次保存已经发出去
+    assert.deepEqual(f.posts.map((post) => post.data.id), [BLOCK_A]);
     f.plugin.onunload();
-    assert.deepEqual(f.posts.map((post) => post.data.id), [BLOCK_A], "卸载不得丢掉未到点的保存");
     assert.equal(f.panelElement(), null);
     assert.equal(protyle.toolbar.subElementCloseCB, originalCloseCB);
     assert.doesNotThrow(() => f.plugin.onunload());

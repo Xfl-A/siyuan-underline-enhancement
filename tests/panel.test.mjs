@@ -239,8 +239,7 @@ const createFixture = (options = {}) => {
 /**
  * 点一个控件并给出这一夹具的全部回调记录。
  *
- * 多步交互现在可以留在同一块面板上：设置类控件不再收面板，只有终止类控件才收。
- * 仍然要一次一步的夹具，是因为每一步都要拿一个干净的调用记录来数回调。
+ * 设置类控件点一下就收面板，因此每一步都要一个干净的调用记录来数回调。
  */
 const activate = (element, options = {}) => {
     const fixture = createFixture(options);
@@ -591,25 +590,23 @@ test("点击线型色块后 onChange 收到新的线型，其余字段原样带�
     close();
 });
 
-test("设置类控件不收面板，终止类控件收面板且 onClose 恰好一次", () => {
-    // 一次选择上往往要连着调线型与颜色，每调一项就收一次面板等于每调一项都要重选一次。
-    // 终止类操作做完没有下一次可调（清除之后整段没有装饰、撤销之后回到上一步、
-    // 原生取色器那条路上选区与浮动工具栏本来就已经收摊），因此它们照旧收工。
-    // 每一项给出「点它应当报上来的回调」与次数。临时自定义色色块按定义就是当前正在用的那个颜色，
-    // 点它因此没有任何新意图，只有它仍被绑上了监听这件事可证
+test("各类控件点一下都收面板，onClose 恰好一次且改动先落地", () => {
+    // 与思源自己的颜色菜单一致：每点一下就完成一次设置，面板随之收起，
+    // 浮动工具栏与选区留给用户。临时自定义色色块按定义就是当前正在用的那个颜色，
+    // 点它因此没有任何新改动，但仍然收面板。
     const steps = [
-        ["线型色块", (f) => f.styleSwatchOf("underline", "wavy"), {}, "change", 1, 0],
-        ["颜色色块", (f) => f.colorSwatchesOf("underline")[5], {}, "change", 1, 0],
-        ["跟随文字色色块", (f) => f.followSwatchOf("underline"), {}, "change", 1, 0],
+        ["线型色块", (f) => f.styleSwatchOf("underline", "wavy"), {}, "change", 1, 1],
+        ["颜色色块", (f) => f.colorSwatchesOf("underline")[5], {}, "change", 1, 1],
+        ["跟随文字色色块", (f) => f.followSwatchOf("underline"), {}, "change", 1, 1],
         [
             "临时自定义色色块",
             (f) => f.customSwatchOf("underline"),
             {initialDecoration: CUSTOM_DECORATION},
             "change",
             0,
-            0,
+            1,
         ],
-        ["方向开关", (f) => f.switchOf("underline"), {}, "change", 1, 0],
+        ["方向开关", (f) => f.switchOf("underline"), {}, "change", 1, 1],
         ["清除装饰", (f) => f.actionButton("clear"), {}, "clear", 1, 1],
         ["撤销", (f) => f.actionButton("undo"), {}, "undo", 1, 1],
         ["原生取色器", () => {}, {pickColor: "#123456"}, "change", 1, 1],
@@ -622,17 +619,16 @@ test("设置类控件不收面板，终止类控件收面板且 onClose 恰好�
     }
 });
 
-test("设置类控件连点多次，面板与选中态都留在原处", () => {
-    // 用户真实的工作方式：先挑线型，再挑颜色。面板必须一直在，控件上的选中态也必须跟着走
+test("设置类控件每点一下都收面板，改动各记一次", () => {
+    // 面板收起与否由调用方决定（这里记录成 close 次数），控件本身的提交照常发生
     const fixture = createFixture();
     fixture.styleSwatchOf("underline", "wavy").click();
     fixture.colorSwatchesOf("underline")[5].click();
     fixture.followSwatchOf("underline").click();
 
-    assert.equal(fixture.countOf("close"), 0, "三下设置都不收面板");
+    assert.equal(fixture.countOf("close"), 3, "三下设置各收一次面板");
     assert.equal(fixture.changes().length, 3, "三下各自产生一次改动");
     assert.deepEqual(toHost(fixture.lastChange()), {enabled: true, style: "wavy", color: ""});
-    assert.equal(fixture.panel.isConnected, true, "面板仍在文档里");
     assert.equal(fixture.styleSwatchOf("underline", "wavy").getAttribute("aria-pressed"), "true");
     assert.equal(fixture.followSwatchOf("underline").getAttribute("aria-pressed"), "true");
     fixture.close();
@@ -783,14 +779,14 @@ test("自定义色的临时色块真的可点，与预设色块行为一致", ()
     chip.click();
     assert.equal(fixture.countOf("change"), 1, "点击确实走到了它自己的监听上");
     assert.deepEqual(fixture.lastChange(), CUSTOM_DECORATION);
-    assert.equal(fixture.countOf("close"), 0, "设置类控件不收面板");
+    assert.equal(fixture.countOf("close"), 1, "设置类控件点一下就收面板");
     fixture.close();
 
-    // 这块色块当前正在被使用，点它没有任何新意图：既不回调，也照样不收面板
+    // 这块色块当前正在被使用，点它没有任何新改动，但仍然收面板
     const current = createFixture({initialDecoration: CUSTOM_DECORATION});
     current.customSwatchOf("underline").click();
     assert.equal(current.countOf("change"), 0, "它正在被使用，本来就没有新意图");
-    assert.equal(current.countOf("close"), 0);
+    assert.equal(current.countOf("close"), 1);
     current.close();
 
     // 换成别处保存的另一个自定义色之后，这一块仍能接住点击：否则用户换不回同一个颜色
@@ -1080,7 +1076,7 @@ test("临时插入的自定义色色块同样不是可聚焦元素", () => {
 
 test("完整的按下-点击序列下，各类控件仍然响应", () => {
     // 控件不是 input，因此没有原生的激活行为可用：click 事件本身就是全部。
-    // 设置类控件按完留着面板，终止类控件按完收面板
+    // 每类控件按完都在提交之后收面板
     const {
         styleSwatchOf,
         press,
@@ -1092,21 +1088,21 @@ test("完整的按下-点击序列下，各类控件仍然响应", () => {
     press(styleSwatchOf("underline", "wavy"));
     assert.equal(countOf("change"), 1);
     assert.equal(lastChange().style, "wavy");
-    assert.equal(countOf("close"), 0, "设置类控件按下-点击不收面板");
+    assert.equal(countOf("close"), 1, "设置类控件按下-点击收面板");
     close();
 
     const colour = createFixture();
     colour.press(colour.colorSwatchesOf("underline")[5]);
     assert.equal(colour.countOf("change"), 1);
     assert.equal(colour.lastChange().color, "#0090ff");
-    assert.equal(colour.countOf("close"), 0);
+    assert.equal(colour.countOf("close"), 1);
     colour.close();
 
     const follow = createFixture();
     follow.press(follow.followSwatchOf("underline"));
     assert.equal(follow.countOf("change"), 1);
     assert.equal(follow.lastChange().color, "");
-    assert.equal(follow.countOf("close"), 0);
+    assert.equal(follow.countOf("close"), 1);
     follow.close();
 
     const clear = createFixture();
@@ -1118,7 +1114,7 @@ test("完整的按下-点击序列下，各类控件仍然响应", () => {
 
 test("移动端走 touchend 绑定，收面板的规则与桌面端一致", () => {
     // preventDefault 掉 touchstart 会连带取消浏览器补发的 click 与触摸的默认滚动，
-    // 面板会既点不动也滚不动；触摸设备上按钮本来也不会抢焦点，因此一条 mousedown 守卫都不需要
+    // 面板会既点不动也滚不动；触摸设备上按钮本来也不会抢焦点，因此不拦任何触摸事件
     const {styleSwatchOf, fire, countOf, lastChange, close} = createFixture({frontend: "mobile"});
     assert.equal(fire(styleSwatchOf("underline", "wavy"), "mousedown", {cancelable: true}).defaultPrevented, false);
     assert.equal(fire(styleSwatchOf("underline", "wavy"), "touchstart", {cancelable: true}).defaultPrevented, false);
@@ -1126,7 +1122,7 @@ test("移动端走 touchend 绑定，收面板的规则与桌面端一致", () =
     fire(styleSwatchOf("underline", "wavy"), "touchend");
     assert.equal(countOf("change"), 1);
     assert.equal(lastChange().style, "wavy");
-    assert.equal(countOf("close"), 0, "移动端的设置类控件同样不收面板");
+    assert.equal(countOf("close"), 1, "移动端的设置类控件同样收面板");
     close();
 });
 

@@ -11,9 +11,10 @@
  * 面板里的控件全部是不可聚焦的 div：可聚焦的元素会在按下时把焦点从 contenteditable 带走，
  * 思源随之清掉选区，浮动工具栏也跟着收起，面板记下的字符偏移于是不再指向用户的文字。
  *
- * 控件分两类，收不收面板也分两类：设置类（线型、颜色、跟随文字色、方向开关）改的是同一次选择上的参数，
- * 一边调一边看着效果才调得准，因此点完留着面板、留着选区与浮动工具栏；
- * 终止类（清除装饰、撤销、原生取色器）做完就收工，没有下一次可调。浮动工具栏任何情况下都不由面板收。
+ * 控件分两类，收不收面板都收：设置类（线型、颜色、跟随文字色、方向开关）选中即提交这一次设置，
+ * 与思源自己的颜色菜单一致 —— 做完就收面板，浮动工具栏与文字选中都留着，要接着调就重新点一次工具栏图标；
+ * 终止类（清除装饰、撤销、原生取色器）同样收工。差别只在原生取色器：系统对话框会拿走焦点，
+ * 那一条路连选区带浮动工具栏一起交出去，其余控件都保留选区与浮动工具栏。
  */
 import {getEventName} from "./dom";
 import {
@@ -61,8 +62,8 @@ export interface IPanelOptions {
     onClear: () => void;
     onUndo: () => void;
     /**
-     * 收起面板。只由终止类控件（清除装饰、撤销、原生取色器）、面板外的点击与 Esc 请出：
-     * 设置类控件不碰它，否则用户每调一项设置就被打断一次。
+     * 收起面板。设置类、清除装饰、撤销、原生取色器以及面板外的点击与 Esc 都会请出它：
+     * 任何一次控件激活都只服务于一次设置，做完即收，与思源自己的颜色菜单一致。
      */
     onClose: () => void;
     /**
@@ -103,6 +104,19 @@ const DIRECTIONS: readonly TDirection[] = ["underline"];
 
 /** 面板根标记；CSS 根选择器与外部识别都靠它 */
 const PANEL_ATTRIBUTE = "data-sue-panel";
+/**
+ * 面板根的来源标记；值取自思源自己的常量（toolbar/subElementLifecycle.ts 的
+ * SELECTION_TOOLBAR_SUB_ELEMENT_SOURCE）。
+ *
+ * 思源在 window 的 mousedown 监听里，只要按下的目标不在 .protyle-toolbar 内、也不带这个标记，
+ * 就调用 hideAllElements(["toolbar"]) 收起浮动工具栏。面板挂在 body 上，正是那个「不在工具栏内」的目标，
+ * 因此必须带上这个标记，思源才把它当成浮动工具栏的一部分而不收起工具栏。
+ * 这既是思源自己的颜色菜单（subElement）用的机制，也是 preventDefault 拦不住的一道检查
+ * （它是 window 上的自定义监听，preventDefault 只影响浏览器默认行为）。
+ */
+const SUB_ELEMENT_SOURCE_ATTRIBUTE = "data-sub-element-source";
+/** 与思源 SELECTION_TOOLBAR_SUB_ELEMENT_SOURCE 一致的值 */
+const SUB_ELEMENT_SOURCE_VALUE = "selection-toolbar";
 /** 方向区块标记，值为 underline */
 const SECTION_ATTRIBUTE = "data-sue-section";
 /** 行标记，值为 switch / style / color */
@@ -590,6 +604,8 @@ export const createPanel = (options: IPanelOptions): IPanelController => {
 
     const panel = createElement<HTMLDivElement>(ownerDocument, "div", "");
     panel.setAttribute(PANEL_ATTRIBUTE, "");
+    // 让思源把面板当成浮动工具栏的一部分：否则点击面板会触发思源的全局 mousedown 收起工具栏
+    panel.setAttribute(SUB_ELEMENT_SOURCE_ATTRIBUTE, SUB_ELEMENT_SOURCE_VALUE);
     // 两端都要限高：定位只夹坐标轴，窗口比面板还矮时没有这条就把底部（含两个动作按钮）裁掉
     panel.style.maxHeight = mobile ? MOBILE_MAX_HEIGHT : MAX_HEIGHT;
     panel.style.overflowY = "auto";
@@ -670,7 +686,10 @@ export const createPanel = (options: IPanelOptions): IPanelController => {
             }
             syncCustomSwatch(ownerDocument, widgets, color, {
                 eventName,
-                bind: (value: string) => update({color: sanitizeColor(value), enabled: true}),
+                bind: (value: string) => {
+                    update({color: sanitizeColor(value), enabled: true});
+                    options.onClose();
+                },
             });
             // 块上已有的自定义色既不在预设里、也不跟随文字色，取色器要跟着显示它；
             // 颜色不是 #rrggbb 时不动控件，免得把用户刚挑的颜色抹成黑色
@@ -704,20 +723,32 @@ export const createPanel = (options: IPanelOptions): IPanelController => {
         const widgets = sections[direction];
         // 线型与颜色两行永远可点：方向关着的时候点它们就是把下划线打开并用上这个值，
         // 否则这两行会变成一批点下去毫无反应的控件。
-        // 四类设置控件都只提交、不收面板：一次选择上往往要连着调线型与颜色，
-        // 收一次就得重新选中一次，用户还没看清效果面板就已经没了
+        // 四类设置控件都在提交之后收起面板，与思源自己的颜色菜单一致：选中即完成这一次设置，
+        // 面板收起后浮动工具栏与文字选中都留着，用户要接着调就重新点一次工具栏图标
         for (const swatch of widgets.styleSwatches) {
             const style = swatch.getAttribute(STYLE_ATTRIBUTE) as TLineStyle;
-            swatch.addEventListener(eventName, () => update({style, enabled: true}));
+            swatch.addEventListener(eventName, () => {
+                update({style, enabled: true});
+                options.onClose();
+            });
         }
         for (const swatch of widgets.colorSwatches) {
             const color = swatch.getAttribute(COLOR_ATTRIBUTE);
-            swatch.addEventListener(eventName, () => update({color: sanitizeColor(color), enabled: true}));
+            swatch.addEventListener(eventName, () => {
+                update({color: sanitizeColor(color), enabled: true});
+                options.onClose();
+            });
         }
-        widgets.followSwatch.addEventListener(eventName, () => update({color: "", enabled: true}));
+        widgets.followSwatch.addEventListener(eventName, () => {
+            update({color: "", enabled: true});
+            options.onClose();
+        });
         // 开关自己切换勾选状态：它不是 input，取不到原生 checkbox 的激活行为。
         // 从关到开是一次真的改动：提交出去的那份配置会被真的裹到文档上，而不只是翻面板内部的开关
-        widgets.toggle.addEventListener(eventName, () => update({enabled: !decoration.enabled}));
+        widgets.toggle.addEventListener(eventName, () => {
+            update({enabled: !decoration.enabled});
+            options.onClose();
+        });
         /**
          * 取色器是面板里唯一必须收场的控件。
          *

@@ -25,10 +25,12 @@ so it reads as distinct from SiYuan's straight underline. Clicking it opens a sm
   The button is disabled when there is nothing to undo. It covers the current panel session only: the stack
   is dropped when you switch documents, so use the document history for anything older. An entry whose blocks
   you have edited since is skipped rather than overwriting your later edits.
-* Every change previews live on the selection and is saved on a 300 ms debounce. The last configuration you
-  used is remembered and becomes the panel's starting point the next time you select undecorated text.
+* Every change previews live on the selection and is saved on a 300 ms debounce. Opening the panel on text
+  that has no underline applies the **default configuration** right away.
 * The default configuration is a **solid line in the text color**. Every control in the panel is always
   clickable — there is nothing you have to enable first.
+* Picking a control applies the change and closes the panel, like SiYuan's own color menu: the selection and
+  the floating toolbar stay where they were, and you reopen the panel from the toolbar to adjust again.
 * If the regions in one selection do not all carry the same decoration, the panel says so before you click:
   one change then applies that single configuration to the whole selection.
 

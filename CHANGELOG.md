@@ -21,8 +21,10 @@ First release.
   `text-decoration-color: currentColor`, which is what omitting the declaration means in CSS.
 * **Clear decoration** to remove the underline from the selection, and **Undo** to step back one change —
   all blocks that change touched are reverted by a single press. Undo is disabled when there is nothing to undo.
-* Live preview on the selection with a 300 ms debounced save. The last configuration used is remembered and
-  becomes the panel's starting point next time. The default is a solid line in the text color.
+* Live preview on the selection with a 300 ms debounced save. Opening the panel on text with no underline
+  applies the default configuration right away. The default is a solid line in the text color.
+* Picking a control applies the change and closes the panel, like SiYuan's own color menu; the selection and
+  the floating toolbar stay in place.
 * Selection ranges spanning paragraphs, list items and table cells; every affected block is saved on its own.
   A _tight_ list whose item text is a direct child of the `<li>` is the exception: it has no editable region
   of its own, so that text cannot be decorated.

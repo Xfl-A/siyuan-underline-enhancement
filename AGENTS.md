@@ -65,20 +65,19 @@ npm run lint && npm run format:check && npm test && node node_modules/typescript
 
 ## jsdom 的盲区 —— 本仓库最容易翻车的地方
 
-`jsdom` **不实现**下列东西，因此相关缺陷测试原理上看不见。已经有四个 bug 因此漏到真机，
-其中「选区丢失」**至今未修**：
+`jsdom` **不实现**下列东西，因此相关缺陷测试原理上看不见。已经有多个 bug 因此漏到真机：
 
-* **不触发 `selectionchange`**。思源据此判断选区是否还在（见下），所以"选区被取消"这类 bug 全绿。
+* **不触发 `selectionchange`**。思源据此判断选区是否还在，所以"选区被取消"这类 bug 全绿。
 * **不应用样式表**。CSS 回归必须**读 `src/index.scss` 源码文本**来断言，`tests/panel.test.mjs` 里有现成写法。
 * **没有布局**。`getBoundingClientRect()` 全返回 0。面板定位因此必须是纯函数 + 合成矩形单测。
-* **不因焦点转移塌掉选区**。真机会。
-* **不会重渲染块**。思源随时重渲染，引用会脱管 —— 必须在夹具里显式模拟（`el.outerHTML = ...`）。
+* **不因焦点转移塌掉选区**。真机会 —— 但「选区丢失」那次最后证明**不是**焦点引起的，别据此下结论。
+* **不会重渲染块 / 不回放内核事务**。思源随时重渲染，引用会脱管 —— 必须在夹具里显式模拟（`el.outerHTML = ...`）。
 
 推论：**jsdom 测不了的东西，要钉"契约"而不是"行为"**，并写进 `docs/manual-verification.md`
 （真机验收清单，中英双语）。新增无法在 jsdom 覆盖的行为时，同步往那份清单加一条。
 
-**但反过来也要当心**：契约断言绿了 ≠ 真机行为正确。「选区」那条契约就是个教训 ——
-它绿着，而真机是坏的。凡是只能靠 jsdom 断言的行为，都要标注"需真机确认"。
+**但反过来也要当心**：契约断言绿了 ≠ 真机行为正确。「选区」那条契约曾经绿着、真机却是坏的，
+最后靠**真机探针日志 + 读思源源码**才定位。凡是只能靠 jsdom 断言的行为，都要标注"需真机确认"。
 
 ## 测试装载器
 
@@ -101,41 +100,48 @@ npm run lint && npm run format:check && npm test && node node_modules/typescript
 「跟随文字颜色」写 `text-decoration-color: currentColor`（**不能省略**）—— 省略时思源会补一条
 `color:`，那是文字色而非装饰色，装饰颜色就失效了。
 
-## 选区丢失 —— 未解决，且已排除多个假设
+## 选区与浮动工具栏 —— 已解决（两个独立原因）
 
-**症状**：面板里改线型/颜色/开关后，编辑器选区与浮动工具栏一起消失。
+真机上「点面板控件后文字选中消失、浮动工具栏收起」实际是两件事，都已在当前实现里解决：
 
-**状态：当前代码（`74106a1`）在真机上仍然复现。** 下面是已确认的事实与**已被证伪**的假设，
-不要把后者当根因。
+### 一、浮动工具栏被思源收起
 
-### 已确认的事实
+思源前端在 `window` 的 `mousedown` 监听里（`app/src/boot/globalEvent/event.ts`）有：
 
-* 思源前端（`resources/stage/build/desktop/main.*.js`，压缩后搜 `selectionchange`）在 `document` 上
-  有 11 处监听，其中一处形如 `if (Ct.rangeCount === 0) { 收起全部工具栏; return; }`。
-* 思源自己的字体颜色菜单**不调用** `getSelection()` / `addRange()` / `focus()`，它持有活的
-  `toolbar.range` 直接改 DOM —— 这是它选区不丢的原因，也是我们要对齐的目标。
-* 面板控件已全部换成不可聚焦元素（`div` + `role`），焦点确实不再被面板夺走。**这一条是对的，
-  但不足以解决问题。**
+```js
+if (
+    !hasClosestByClassName(event.target, "protyle-toolbar") &&
+    !hasClosestByAttribute(event.target, "data-sub-element-source", "selection-toolbar")
+) {
+    hideAllElements(["toolbar"]);
+}
+```
 
-### 已被证伪的假设
+面板挂在 `document.body` 上，正好落在「不在工具栏内、也不带标记」这一支，于是每次在面板里按下都会收起浮动工具栏。
+`preventDefault()` 拦不住它（那是自定义监听，不是浏览器默认行为）—— 这也解释了为什么加 `mousedown` 守卫没用。
+修复：面板根带上 `data-sub-element-source="selection-toolbar"`（思源自己的颜色菜单用的同一机制，见 `src/panel.ts`）。
 
-* ❌「`restoreOffsets` 里的 `focus()` 塌掉选区」→ 去掉后真机仍复现。
-* ❌「`removeAllRanges()` 让 `rangeCount` 瞬时归零」→ 改用 `setBaseAndExtent` 后真机仍复现。
+### 二、选区在落盘回放之后被换块带走
 
-`tests/dom.test.mjs` 里那条「重建选区不得调 focus() / 不得清空选区」的断言**目前是绿的，
-但它不对应真机可用行为**。它只能防止代码回退，**不能**作为"选区问题已解决"的证据 ——
-不要因为它绿就认为这条通了。
+保存走 `/api/block/updateBlock`，内核会把这笔更新作为事务回放给前端。思源回放 `update` 操作时
+（`app/src/protyle/wysiwyg/transaction.ts` 的 `updateBlock`）用一份**新的块节点**替换旧节点，
+且**只在撤销时回填光标，普通更新不回填**。于是插件刚重建的选区随即丢失（真机日志里能看到
+`mutation +[<div.p#…>] -[<div.p#…>]`，时间点正好在落盘之后）。
 
-### 下一步该往哪查（未验证）
+修复：`src/index.ts` 的 `watchBlockRepin` / `applyPendingRepin`。每次真的改动块之后开始观察编辑区，
+一旦看到自己那个块节点被换掉，就按块 id 找回新节点、重认领可编辑区域、坐标校验通过后把选区重新落回同一段文字；
+用户若已另作选择就不抢。只在真机（`protyle.protyle.ws` 存在）上启用。
 
-* 在真机上抓一次实际时序：点击后 `document.getSelection().rangeCount`、`document.activeElement`、
-  浮动工具栏 DOM 的 class 变化，以及 `selectionchange` 触发次数。**在 jsdom 里做这件事没有意义**
-  （不触发该事件）。
-* 怀疑方向：`applySpansIn` 用 `extractContents()` + `insertNode()` 重排 DOM 后，活的 Range
-  被浏览器调整到新位置，但 `document` 的选区已不再映射到它。思源字体颜色菜单也用同样手法却能保住，
-  差异可能在于它**从不重建选区**。值得试的方向是让 DOM 手术不触碰 `document.getSelection()`。
-* 症状里「浮动工具栏消失」与「选中消失」是否同一因果，尚不确定：也可能是面板关闭路径
-  （`closePanel` → 还原 `subElementCloseCB`）误伤了工具栏。
+**顺带修掉的一个错误**：`src/persist.ts` 的 `findBlockElement` 原来在整篇文档里按 `data-node-id` 取第一个匹配，
+而**面包屑也带同名 id 且排在编辑区之前**，于是重落选区会落到不可编辑的面包屑上。现在优先取
+`.protyle-wysiwyg` 内的那个节点。`tests/index.test.mjs` 的夹具因此补上了面包屑，专门钉住这一点。
+
+### 排查时被证伪的假设（别再走）
+
+* ❌「`restoreOffsets` 里的 `focus()`」：去掉后真机仍复现。
+* ❌「`removeAllRanges()` 让 `rangeCount` 瞬时归零」：改用 `setBaseAndExtent` 后仍复现。
+* ❌「面板控件可聚焦 / 鼠标焦点」：控件早已换成不可聚焦 `div`，`mousedown` 守卫实测无效；
+  真正原因是上面的 `window` mousedown 收工具栏 + 内核回放换块。
 
 ## 约定
 

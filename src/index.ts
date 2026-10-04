@@ -63,9 +63,6 @@ const ICON_ID = "iconUnderlineEnhancement";
 /** 保存防抖窗口（ms）：实时预览会以毫秒级连续触发，落盘合并成一个窗口 */
 const SAVE_DEBOUNCE_MS = 300;
 
-/** 记住上次配置的插件私有存储文件名 */
-const SETTINGS_FILE = "settings.json";
-
 /** 块 id 的属性名；防抖保存的记账键必须与元素自身的这个值一致 */
 const NODE_ID_ATTRIBUTE = "data-node-id";
 
@@ -78,7 +75,7 @@ const CLEARED_DECORATION: IDecoration = {...DEFAULT_DECORATION, enabled: false};
 
 /** 打开面板时从选区读到的状态 */
 interface ICurrentDecoration {
-    /** 面板的初值：选区里已有的装饰，或上次用过的配置 */
+    /** 面板的初值：选区里已有的装饰；选区里没有装饰时是默认配置（实线 + 跟随文字色） */
     decoration: IDecoration;
     /** 选区各区域的装饰不一致 */
     mixed: boolean;
@@ -95,6 +92,23 @@ interface IApplyOptions {
     dropNativeUnderline?: boolean;
 }
 
+/**
+ * 一次等待内核事务回放的选区重落。
+ *
+ * 内核会把块更新事务回放回前端，回放时整块节点被一份新的换掉（思源的 onTransaction → updateBlock），
+ * 插件的选区随之丢失。这里记下当时的块与偏移，等块真被换掉时把选区重新落回同一段文字。
+ */
+interface IPendingRepin {
+    /** 应用时记下的分组；块被换掉后按块 id 找回新节点 */
+    groups: IEditableGroup[];
+    /** 重落选区用的字符偏移快照（不复用 this.offsets：面板收起时会清空它） */
+    offsets: Array<[HTMLElement, number, number]>;
+    /** 盯着块被替换的观察器 */
+    observer: MutationObserver;
+    /** 兜底定时器：迟迟没有回放就把观察器撤掉 */
+    timer: number;
+}
+
 export default class UnderlineEnhancement extends Plugin {
     /** 当前面板；null 表示没有打开的面板 */
     private panel: IPanelController = null;
@@ -104,22 +118,23 @@ export default class UnderlineEnhancement extends Plugin {
     private groups: IEditableGroup[] = [];
     /** 打开面板时记下的字符偏移；包裹装饰会让原 Range 失效，只能靠它重建选区 */
     private offsets: Array<[HTMLElement, number, number]> = [];
-    /** 刚应用到文档上的那一份配置，关闭面板时据此记住上次的用法 */
-    private appliedDecoration: IDecoration = null;
     /** 防抖保存器：所有块共用一个窗口 */
     private saver: IDebouncedSaver = null;
     /** 打开面板时挂着的浮动工具栏，关闭时要把 subElementCloseCB 还回去 */
     private toolbar: Toolbar = null;
     /** 思源原有的关闭回调；插件的回调不能留在思源的对象上 */
     private previousSubElementCloseCB: () => void = null;
-    /** 记住的上次配置，选区里没有装饰时作为面板初值 */
-    private rememberedDecoration: IDecoration = null;
     /** 撤销进行中；重复触发会与前一次抢同一个栈顶 */
     private undoing = false;
+    /** 前端是否连着内核 WebSocket：只有它会回放块事务、换掉块节点，也才需要重落选区 */
+    private kernelEcho = false;
+    /** 待重落的选区；同一时刻只保留最新一次 */
+    private pendingRepin: IPendingRepin = null;
 
     /** 切换文档或页签：块 id 已不属于当前文档，留着的撤销记录只会让撤销一直卡在过期项上 */
     private readonly handleProtyleSwitch = () => {
         this.closePanel();
+        this.cancelPendingRepin();
         clearChanges();
     };
 
@@ -145,19 +160,10 @@ export default class UnderlineEnhancement extends Plugin {
         this.eventBus.on("switch-protyle", this.handleProtyleSwitch);
     }
 
-    async onLayoutReady() {
-        try {
-            // 读回的是磁盘上的外部数据，必须过白名单才能进面板，也才能再写回文档
-            this.rememberedDecoration = sanitizeDecoration(await this.loadData(SETTINGS_FILE));
-        } catch (error) {
-            // 读不到只影响「上次用过什么」：初值退回默认值，其余功能不受影响
-            console.log(`[${this.name}] load data [${SETTINGS_FILE}] fail: `, error);
-        }
-    }
-
     onunload() {
         // 关闭面板会把未到点的保存发出去，因此先收面板，再摘工具栏项
         this.closePanel();
+        this.cancelPendingRepin();
         this.saver?.cancel();
         this.removeToolbarItem(TOOLBAR_ITEM_NAME);
         this.eventBus?.off("switch-protyle", this.handleProtyleSwitch);
@@ -179,6 +185,10 @@ export default class UnderlineEnhancement extends Plugin {
         if (this.panel !== null || !toolbar) {
             return;
         }
+        // 新的一次会话开始，上一次遗留的重落作废
+        this.cancelPendingRepin();
+        // 前端只有连着内核 WebSocket 时才会收到块事务回放；测试夹具没有 ws，因此不会走重落那条路
+        this.kernelEcho = Boolean((protyle as unknown as {protyle?: {ws?: unknown;};})?.protyle?.ws);
         const groups = collectEditableGroups(toolbar.range);
         if (groups.length === 0) {
             // 选区落在代码块、公式、属性视图等不可编辑区域里，没有可装饰的目标
@@ -186,7 +196,6 @@ export default class UnderlineEnhancement extends Plugin {
         }
         this.groups = groups;
         this.offsets = captureOffsets(toolbar.range);
-        this.appliedDecoration = null;
         this.undoing = false;
         this.toolbar = toolbar;
         this.previousSubElementCloseCB = toolbar.subElementCloseCB;
@@ -229,19 +238,16 @@ export default class UnderlineEnhancement extends Plugin {
      * 打开面板时的落笔。
      *
      * 选区里已经带着下划线：只把设置显示出来，文档一个字节都不动（重裹一遍已有的装饰只会多一次落盘）。
-     * 选区里没有下划线：把面板这一份配置真的应用上去 —— 只翻面板内部的开关，屏幕上仍然什么都不会出现，
-     * 用户看到的就会是「开关亮着却没有下划线」。这一次改动与用户自己点出来的改动走同一条路，
-     * 因此同样进撤销栈、同样按块防抖落盘。
-     *
-     * 记住的配置本身是关着（下划线关掉之后关闭面板记下的那一份）时不开：那是用户上一次的明确决定，
-     * 打开面板不该替他重新打开。要打开时点开关即可，那一步仍然会把装饰真的应用上去。
+     * 选区里没有下划线：把默认配置（实线 + 跟随文字色）真的应用上去 —— 只翻面板内部的开关，
+     * 屏幕上仍然什么都不会出现，用户看到的就会是「开关亮着却没有下划线」。这一次改动与用户自己点出来的
+     * 改动走同一条路，因此同样进撤销栈、同样按块防抖落盘。
      *
      * 思源自己的 `<u>` 一律脱掉，与选区里有没有插件装饰无关：插件接管这段文字的下划线之后，
      * 思源那一条必须让位，否则同一次选择上会同时出现两条线，而思源那条没有面板可以调。
      */
     private applyAtOpen(current: ICurrentDecoration): void {
         const dropNativeUnderline = this.hasNativeUnderline();
-        if (!dropNativeUnderline && (current.decorated || !current.decoration.enabled)) {
+        if (!dropNativeUnderline && current.decorated) {
             return;
         }
         this.applyDecoration(current.decoration, {dropNativeUnderline});
@@ -302,9 +308,96 @@ export default class UnderlineEnhancement extends Plugin {
         // 动它只会平白让思源看到一次 rangeCount 归零，把浮动工具栏收掉
         if (changed.length > 0) {
             restoreOffsets(this.offsets);
+            // 这次改动会落盘，内核随后会把块事务回放回来并换掉整块节点，选区要在那之后再落一次
+            this.watchBlockRepin();
         }
-        this.appliedDecoration = sanitizeDecoration(decoration);
-        this.syncPanel(this.appliedDecoration);
+        this.syncPanel(sanitizeDecoration(decoration));
+    }
+
+    /**
+     * 盯住内核事务回放带来的整块替换，随后把选区重新落回同一段文字。
+     *
+     * 保存走的是 `/api/block/updateBlock`，内核会把这笔更新作为事务回放给前端；思源回放时用一份
+     * 新的块节点替换旧节点（见其 onTransaction → updateBlock），而它只在撤销时回填光标，
+     * 普通更新不回填，于是插件刚重建好的选区随即丢失。这里在旧块被移除的那一刻把选区补回去。
+     *
+     * 只有真的改动了块才需要它：没有落盘就没有回放，也就没有这次替换。
+     */
+    private watchBlockRepin(): void {
+        this.cancelPendingRepin();
+        if (
+            !this.kernelEcho || typeof window === "undefined" ||
+            typeof window.MutationObserver !== "function"
+        ) {
+            return;
+        }
+        const editor = this.groups[0]?.editableElement?.closest(".protyle-wysiwyg");
+        if (!editor) {
+            return;
+        }
+        // 快照：面板收起时会清空 this.groups / this.offsets，而回放可能发生在收起之后
+        const groups = this.groups.map((group) => ({...group}));
+        const offsets = this.offsets.map((item): [HTMLElement, number, number] => [item[0], item[1], item[2]]);
+        const observer = new window.MutationObserver((records) => {
+            const replaced = records.some((record) =>
+                Array.from(record.removedNodes).some((node) =>
+                    node instanceof window.Element && groups.some((group) => group.blockElement === node)
+                )
+            );
+            if (replaced) {
+                this.applyPendingRepin();
+            }
+        });
+        observer.observe(editor, {childList: true, subtree: true});
+        // 回放通常紧跟落盘之后到来；迟迟不来就撤掉，别让它一直挂着
+        const timer = window.setTimeout(() => this.cancelPendingRepin(), 1500);
+        this.pendingRepin = {groups, offsets, observer, timer};
+    }
+
+    /** 块被换掉后把选区落回同一段文字；块已不在或坐标越界时放弃，用户已另作选择时也不抢 */
+    private applyPendingRepin(): void {
+        const pending = this.pendingRepin;
+        if (pending === null) {
+            return;
+        }
+        this.cancelPendingRepin();
+        // 用户已经另作选择时不要抢：只有当前选区为空、或端点已随旧块脱管，才认为选区确实丢了
+        const selection = window.getSelection?.();
+        if (selection && selection.rangeCount > 0) {
+            const range = selection.getRangeAt(0);
+            const live = range.startContainer.isConnected && range.endContainer.isConnected;
+            if (live && !range.collapsed && selection.toString() !== "") {
+                return;
+            }
+        }
+        const offsets: Array<[HTMLElement, number, number]> = [];
+        for (const group of pending.groups) {
+            let blockElement = group.blockElement;
+            if (!blockElement.isConnected) {
+                const blockId = blockElement.getAttribute(NODE_ID_ATTRIBUTE);
+                blockElement = blockId === null ? null : findBlockElement(blockId);
+            }
+            if (blockElement === null) {
+                return;
+            }
+            const editableElement = reclaimEditableElement(group.editableElement, blockElement);
+            if (!offsetsWithinContent(editableElement, group)) {
+                return;
+            }
+            offsets.push([editableElement, group.start, group.end]);
+        }
+        restoreOffsets(offsets);
+    }
+
+    /** 撤掉待重落的选区；可重复调用 */
+    private cancelPendingRepin(): void {
+        const pending = this.pendingRepin;
+        if (pending === null) {
+            return;
+        }
+        this.pendingRepin = null;
+        pending.observer.disconnect();
+        window.clearTimeout(pending.timer);
     }
 
     /** 撤销：先把改动前的块 HTML 写回文档，再按文档里的真实状态刷新面板 */
@@ -392,7 +485,7 @@ export default class UnderlineEnhancement extends Plugin {
      *
      * 各分组一致时就用那一份；不一致时取第一份有装饰的，并如实报出「混合」，
      * 由面板先把这件事说清楚 —— 一次改动会把整个选区统一，用户该在点之前就知道。
-     * 全都没有装饰时回到上次用过的配置，没有记录就用默认值，并报出「选区里没有装饰」。
+     * 全都没有装饰时回到默认配置（实线 + 跟随文字色），并报出「选区里没有装饰」。
      */
     private readCurrentDecoration(): ICurrentDecoration {
         const decorations = this.groups.map((group) => {
@@ -402,7 +495,7 @@ export default class UnderlineEnhancement extends Plugin {
         const decorated = decorations.filter((item) => item.enabled);
         if (decorated.length === 0) {
             return {
-                decoration: this.rememberedDecoration ?? DEFAULT_DECORATION,
+                decoration: DEFAULT_DECORATION,
                 mixed: false,
                 decorated: false,
             };
@@ -454,18 +547,13 @@ export default class UnderlineEnhancement extends Plugin {
             // 面板开着就意味着有未到点的保存，离开前必须发出去 —— 一个块一次 updateBlock，
             // 上面这次 flush 就是那一次保存，它不会因此再存一份
             this.saver?.flush();
-            // 记住这次真正落到文档上的那一份（写的是插件自己的设置文件，与块保存互不相干）
-            if (this.appliedDecoration !== null) {
-                this.saveDecoration(this.appliedDecoration);
-            }
             this.panel.destroy();
             this.panel = null;
             this.panelOptions = null;
             this.groups = [];
             this.offsets = [];
-            this.appliedDecoration = null;
-            // 撤销栈不在这里清：面板收在终止类控件激活与面板外点击之后，一次会话里可能已经装下
-            // 好几次改动（设置类控件不再收面板），在这里清空等于撤销永远按不动。
+            // 撤销栈不在这里清：面板收在设置类控件激活与面板外点击之后，一次会话里可能已经装下
+            // 好几次改动（设置类控件也会收面板，用户会反复重开），在这里清空等于撤销永远按不动。
             // 切换文档与卸载仍然照旧清空（见上），
             // 而撤销前的过期校验会保证记错的记录被丢掉而不是改坏文档。
         }
@@ -474,13 +562,5 @@ export default class UnderlineEnhancement extends Plugin {
             this.toolbar = null;
             this.previousSubElementCloseCB = null;
         }
-    }
-
-    /** 记住上次用过的配置；写盘失败只影响下次打开面板的初值，不值得打断用户 */
-    private saveDecoration(decoration: IDecoration): void {
-        this.rememberedDecoration = decoration;
-        this.saveData(SETTINGS_FILE, decoration).catch((error: unknown) => {
-            console.log(`[${this.name}] save data [${SETTINGS_FILE}] fail: `, error);
-        });
     }
 }
