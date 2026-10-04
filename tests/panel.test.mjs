@@ -871,3 +871,43 @@ test("写进面板的颜色一律先过白名单，脏值既不进 DOM 也不进
     );
     close();
 });
+
+// 面板必须有不透明表面。
+// 曾给面板根挂过思源的浮层类 b3-popover，但那个类名在思源 3.8.6 的样式表里并不存在
+// （真实的浮层表面类是 .b3-menu），于是背景/边框/圆角/阴影全部落空，横向内边距也是 0，
+// 底下的正文直接透过面板显示。jsdom 不加载样式表，因此这里核对样式表源码与类名引用。
+test("面板根有不透明表面，且不挂思源未定义的浮层类", () => {
+    const scss = readFileSync(new URL("../src/index.scss", import.meta.url), "utf8");
+    const root = /\[data-sue-panel\]\s*\{([^}]*)\}/.exec(scss);
+    assert.ok(root, "index.scss 里必须有 [data-sue-panel] 规则");
+    const body = root[1];
+
+    for (const declaration of ["background-color:", "border:", "border-radius:", "box-shadow:", "padding:"]) {
+        assert.ok(body.includes(declaration), `[data-sue-panel] 缺少 ${declaration} 声明`);
+    }
+    // 横向内边距原来为 0，色块贴边；思源的 .b3-menu 只有 8px 0，这里要补成四边
+    assert.match(body, /padding:\s*8px\s*;/, "[data-sue-panel] 必须给出四边内边距");
+
+    // 背景兜底链的末端必须是不透明纯色。思源若改名，兜底值要接住，不能退化成透明
+    assert.match(
+        body,
+        /background-color:[^;]*var\(--b3-menu-background[^;]*#fff[^;]*;/,
+        "background-color 必须以 --b3-menu-background 起头、以不透明 #fff 兜底",
+    );
+    assert.ok(
+        !/background-color:[^;]*(transparent|rgba\([^)]*0?\.\d+\))/i.test(body),
+        "面板背景不得依赖透明或半透明色",
+    );
+    for (const token of ["var(--b3-theme-surface-lighter", "var(--b3-border-radius-b", "var(--b3-dialog-shadow"]) {
+        assert.ok(body.includes(token), `面板表面缺少主题变量 ${token}，深浅主题会不一致`);
+    }
+
+    // 类名回归：b3-popover 在思源里不存在，挂上去等于什么都没做。
+    // 先剥掉注释再比对——解释这个坑的注释里本来就会提到这个名字
+    const panelSource = readFileSync(new URL("../src/panel.ts", import.meta.url), "utf8");
+    const code = panelSource.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
+    assert.ok(
+        !code.includes("b3-popover"),
+        "panel.ts 的代码不得引用思源不存在的 b3-popover：面板会失去背景",
+    );
+});

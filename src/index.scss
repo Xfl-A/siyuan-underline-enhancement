@@ -1,7 +1,11 @@
-// 浮动面板的样式：只描述排布与尺寸，控件外观一律沿用思源既有的 b3-* 类。
+// 浮动面板的样式：排布与尺寸自己写全，控件外观一律沿用思源既有的 b3-* 类。
 // 因此这里刻意不覆盖控件的高度、内边距、字体、边框、阴影与悬浮态，
 // 只在选中态补一圈指示色，让「哪一项被选中」在主题之外也读得出来。
 //
+// 面板容器自身的表面不算控件，得自己给。这一组属性的取值与思源 .b3-menu 完全一致，
+// 因此外观和思源自己的浮层统一，深浅主题也自动跟随：
+// --b3-menu-background 实际指向 --b3-theme-background（daylight #fff / midnight #1e1e1e，均不透明）。
+// 每个变量都带兜底值：思源将来改名，也不会悄悄退化成透明背景。
 // 根选择器用 [data-sue-panel]：面板挂在 document.body 上，必须能被本样式表认出来。
 
 [data-sue-panel] {
@@ -9,6 +13,12 @@
   width: 300px;
   max-width: calc(100vw - 24px);
   box-sizing: border-box;
+  // 思源的 .b3-menu 只有上下内边距，色块会贴到左右边缘，这里补成四边
+  padding: 8px;
+  background-color: var(--b3-menu-background, var(--b3-theme-background, #fff));
+  border: 1px solid var(--b3-theme-surface-lighter, #e0e0e0);
+  border-radius: var(--b3-border-radius-b, 12px);
+  box-shadow: var(--b3-dialog-shadow, 0 8px 24px rgba(0, 0, 0, 0.2));
 }
 
 [data-sue-panel] [data-sue-title] {

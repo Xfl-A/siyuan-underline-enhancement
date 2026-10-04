@@ -99,8 +99,15 @@ const MOBILE_ATTRIBUTE = "data-sue-mobile";
 const SELECTED_CLASS = "sue-swatch--selected";
 /** 色块 class；控件外观仍由思源的 b3-button 提供 */
 const SWATCH_CLASS = "sue-swatch";
-/** 面板根沿用思源的浮层容器 */
-const PANEL_CLASS = "b3-popover";
+/**
+ * 面板根不挂思源的浮层类。
+ *
+ * 曾经挂的是 b3-popover，但思源 3.8.6 的样式表里根本没有这个类（真实的浮层表面类是
+ * .b3-menu），于是面板拿不到任何背景/边框/圆角/阴影，内边距也是 0，底下的正文直接透出来。
+ * .b3-menu 虽能一次拿到整套表面，但思源 JS 里有上千处引用 b3-menu 家族（__item/__items/
+ * __separator…），把面板挂进那一族等于依赖大量没读过的规则。
+ * 因此表面由 index.scss 用思源的主题变量自行给出，值与 .b3-menu 一致。
+ */
 /** 行沿用思源的列表行，只额外补一个自己的类控制间距 */
 const ROW_CLASS = "b3-list-item sue-row";
 /** 标签沿用思源的列表标签 */
@@ -475,7 +482,7 @@ export const createPanel = (options: IPanelOptions): IPanelController => {
     let mixed = options.mixed === true;
     let destroyed = false;
 
-    const panel = createElement<HTMLDivElement>(ownerDocument, "div", PANEL_CLASS);
+    const panel = createElement<HTMLDivElement>(ownerDocument, "div", "");
     panel.setAttribute(PANEL_ATTRIBUTE, "");
     // 两端都要限高：定位只夹坐标轴，窗口比面板还矮时没有这条就把底部（含两个动作按钮）裁掉
     panel.style.maxHeight = mobile ? MOBILE_MAX_HEIGHT : MAX_HEIGHT;
