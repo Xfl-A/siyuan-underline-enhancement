@@ -6,7 +6,7 @@
  *
  * 面板挂在 document.body 上而不是浮动工具栏内部：IMenuItem.click 只给出 protyle 实例，
  * 拿不到触发按钮元素，而思源内部 subElement 的定位并非公开契约。
- * 因此 options.anchor 只作定位参照，面板自身的坐标在插入 DOM 后量出来再夹进视口。
+ * 因此 options.anchor 只是定位参照之一：面板要避开的是选区，坐标在插入 DOM 后量出来再夹进视口。
  */
 import {getEventName} from "./dom";
 import {
@@ -22,6 +22,8 @@ import type {
     IDecorationPair,
     TLineStyle,
 } from "./model";
+import {choosePlacement} from "./placement";
+import type {IRect} from "./placement";
 
 export interface IPanelOptions {
     /** 定位参照：思源浮动工具栏的容器元素 */
@@ -141,7 +143,7 @@ const MIXED_CLASS = "sue-mixed";
 
 // ---------------------------------------------------------------- 定位与常量
 
-/** 面板与锚点之间的间距（px） */
+/** 面板与参照矩形之间的间距（px）；参照矩形优先是选区，量不到时才是锚点 */
 const ANCHOR_GAP = 8;
 /** 面板与视口边缘的最小间距（px） */
 const VIEWPORT_MARGIN = 12;
@@ -435,54 +437,95 @@ const viewportSize = (doc: Document): {width: number; height: number;} => {
     return {width, height};
 };
 
-/** 把值夹进区间；区间本身被挤扁（面板比视口还宽）时退到下界，不会翻到视口另一侧 */
-const clampToRange = (value: number, lower: number, upper: number): number => {
-    const high = Math.max(lower, upper);
-    return Math.min(Math.max(value, lower), high);
+/**
+ * 元素的矩形；元素缺失或已脱离文档时返回 null。
+ *
+ * 浮动工具栏被思源重渲染之后旧节点会脱离文档，而脱离文档的元素照样能量出矩形（全零），
+ * 拿它算居中会把面板钉到视口左上角，因此 isConnected 是第一道闸门。
+ */
+const connectedRectOf = (element: HTMLElement): IRect | null => {
+    if (element?.isConnected !== true || typeof element.getBoundingClientRect !== "function") {
+        return null;
+    }
+    const rect = element.getBoundingClientRect();
+    return {left: rect.left, top: rect.top, width: rect.width, height: rect.height};
 };
 
 /**
- * 按锚点给面板定位置。
+ * 当前选区在视口坐标系下的外接矩形；量不到就返回 null。
  *
- * 面板挂在 body 上用绝对定位，坐标要在插入 DOM 之后量：先按锚点水平居中、落在下方，
- * 下方放不下就翻到锚点上方，最后整体夹进视口，保证任何时候都有一部分面板可见。
+ * 选区才是「不能被压住的文字」：浮动工具栏只挨着它的一端，单看工具栏的框会把其余部分漏掉。
+ * Range.getBoundingClientRect 给的是范围内所有行盒的并集，多行、多块的选区因此也合成一个矩形。
+ * 每次重新摆放都现量一次：重裹装饰与滚动都会挪动这段文字，记下来的旧矩形随即失效。
+ */
+const selectionRectOf = (view: Window): IRect | null => {
+    const selection = view?.getSelection?.();
+    if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
+        return null;
+    }
+    const range = selection.getRangeAt(0);
+    // Range.getBoundingClientRect 并非处处都有（jsdom 就没有），缺它时按量不到选区处理
+    if (typeof range?.getBoundingClientRect !== "function") {
+        return null;
+    }
+    const rect = range.getBoundingClientRect();
+    // 宽或高为 0 量的是光标而不是文字：交给锚点去定位，面板不必为此挪开
+    return rect.width > 0 && rect.height > 0 ?
+        {left: rect.left, top: rect.top, width: rect.width, height: rect.height} :
+        null;
+};
+
+/**
+ * 写回面板坐标；值没变就不写。
+ *
+ * 滚动事件来得比一帧还密，整页滚动时算出来的文档坐标其实一直没变，
+ * 而每次写 style 都会让浏览器把布局标记为待更新，下一次读矩形就得重排一次。
+ */
+const movePanelTo = (panel: HTMLElement, left: number, top: number): void => {
+    const x = `${left}px`;
+    const y = `${top}px`;
+    if (panel.style.left !== x) {
+        panel.style.left = x;
+    }
+    if (panel.style.top !== y) {
+        panel.style.top = y;
+    }
+};
+
+/**
+ * 按选区给面板定位置，量不到选区时退回锚点。
+ *
+ * 基准矩形优先取选区：面板要让开的是那段文字，而浮动工具栏只挨着选区的一端，拿它当基准会漏掉其余部分。
+ * 四个方向的取舍全在 choosePlacement 里完成，这里只提供矩形、拿回坐标。
+ * 面板挂在 body 上用绝对定位，坐标要在插入 DOM 之后量，末尾再加上滚动偏移换成文档坐标。
  */
 const placePanel = (panel: HTMLElement, anchor: HTMLElement): void => {
     const doc = panel.ownerDocument;
     const view = doc.defaultView;
-    const panelRect = panel.getBoundingClientRect();
-    // 锚点必须还在文档里：浮动工具栏被思源重渲染后，旧节点会脱离文档，
-    // 而脱离文档的元素照样能量出矩形（全零），拿它算居中会把面板钉到视口左上角
-    const anchorRect = anchor?.isConnected === true && typeof anchor.getBoundingClientRect === "function" ?
-        anchor.getBoundingClientRect() :
-        null;
-    const viewport = viewportSize(doc);
-    panel.style.position = "absolute";
-    if (anchorRect === null) {
-        panel.style.left = `${VIEWPORT_MARGIN}px`;
-        panel.style.top = `${VIEWPORT_MARGIN}px`;
-        return;
+    if (panel.style.position !== "absolute") {
+        panel.style.position = "absolute";
     }
-    // 绝对定位相对文档坐标系，视口坐标要先加上滚动偏移
+    // 绝对定位相对文档坐标系，视口坐标要先加上滚动偏移，两条出口都一样
     const scrollLeft = view?.scrollX ?? 0;
     const scrollTop = view?.scrollY ?? 0;
-    const centered = anchorRect.left + anchorRect.width / 2 - panelRect.width / 2;
-    const below = anchorRect.bottom + ANCHOR_GAP;
-    const above = anchorRect.top - panelRect.height - ANCHOR_GAP;
-    const fitsBelow = viewport.height <= 0 || viewport.height - anchorRect.bottom >= panelRect.height + VIEWPORT_MARGIN;
-    const placeAbove = !fitsBelow && above > VIEWPORT_MARGIN;
-    const left = clampToRange(
-        centered + scrollLeft,
-        scrollLeft + VIEWPORT_MARGIN,
-        scrollLeft + viewport.width - panelRect.width - VIEWPORT_MARGIN,
-    );
-    const top = clampToRange(
-        (placeAbove ? above : below) + scrollTop,
-        scrollTop + VIEWPORT_MARGIN,
-        scrollTop + viewport.height - panelRect.height - VIEWPORT_MARGIN,
-    );
-    panel.style.left = `${Math.round(left)}px`;
-    panel.style.top = `${Math.round(top)}px`;
+    const selection = selectionRectOf(view);
+    const reference = selection ?? connectedRectOf(anchor);
+    if (reference === null) {
+        // 选区与锚点都拿不到：停在视口边距上，面板仍然可用
+        movePanelTo(panel, VIEWPORT_MARGIN + scrollLeft, VIEWPORT_MARGIN + scrollTop);
+        return;
+    }
+    const panelRect = panel.getBoundingClientRect();
+    const placement = choosePlacement({
+        viewport: viewportSize(doc),
+        panel: {width: panelRect.width, height: panelRect.height},
+        reference,
+        // 只让开选区：工具栏是界面的一部分，压住它不违背「不遮挡文字」这一条
+        avoid: selection,
+        gap: ANCHOR_GAP,
+        margin: VIEWPORT_MARGIN,
+    });
+    movePanelTo(panel, placement.left + scrollLeft, placement.top + scrollTop);
 };
 
 /** 标记色块的选中态：aria-pressed 给无障碍，class 给主题 */
@@ -494,6 +537,8 @@ const markSelected = (element: HTMLElement, selected: boolean): void => {
 export const createPanel = (options: IPanelOptions): IPanelController => {
     // 面板必须与锚点同属一个 document，否则量到的 rect 与写入的坐标不在同一坐标系
     const ownerDocument = options.anchor?.ownerDocument ?? document;
+    // 视口事件也挂在这个 window 上：面板的坐标是视口坐标，写进 style 时才换算成文档坐标
+    const view = ownerDocument.defaultView;
     // 事件名在建面板时取一次：绑到一半再问，前端判断出岔子会让面板一半控件响应、一半不响应
     const eventName = getEventName();
     const mobile = eventName === TOUCH_EVENT;
@@ -542,6 +587,32 @@ export const createPanel = (options: IPanelOptions): IPanelController => {
 
     ownerDocument.body.appendChild(panel);
     placePanel(panel, options.anchor);
+
+    /**
+     * 视口变了就重摆一次。
+     *
+     * 坐标是打开那一刻算出来的，缩放窗口或滚动正文之后面板会留在原处，甚至压回正在改的那段文字上。
+     * 重摆时重新量活选区，因此重裹装饰挪动了文字也跟着跟上。
+     */
+    const reposition = (): void => {
+        if (!destroyed) {
+            placePanel(panel, options.anchor);
+        }
+    };
+    /**
+     * 捕获阶段收滚动：思源的每个编辑区各自是滚动容器，冒泡阶段的监听收不到它们内部的滚动。
+     * 面板自己也是滚动容器，滚它的内容属于面板内部，不该反过来把面板挪走。
+     */
+    const handleScroll = (event: Event): void => {
+        const target = event.target as Node | null;
+        const isNode = typeof (target as Element)?.nodeType === "number";
+        if (isNode && (target === panel || panel.contains(target))) {
+            return;
+        }
+        reposition();
+    };
+    view?.addEventListener("resize", reposition);
+    view?.addEventListener("scroll", handleScroll, {capture: true, passive: true});
 
     /** 把面板内部状态画到控件上 */
     const render = (): void => {
@@ -707,6 +778,10 @@ export const createPanel = (options: IPanelOptions): IPanelController => {
             ownerDocument.removeEventListener("keydown", handleKeydown);
             // 这一个同样显式摘掉：面板虽然已经从 DOM 移除，脱管节点上的按下不该再被它拦住
             panel.removeEventListener(PRESS_EVENT, handleMouseDown);
+            // 视口上的两个监听同理：面板销毁之后不该再被滚动与缩放带着走。
+            // 摘捕获阶段的滚动监听必须带上同一个 capture 标志，否则摘不掉。
+            view?.removeEventListener("resize", reposition);
+            view?.removeEventListener("scroll", handleScroll, true);
             panel.remove();
         },
     };

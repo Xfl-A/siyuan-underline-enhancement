@@ -66,11 +66,26 @@ const rect = (left, top, width, height) => ({
     toJSON: () => ({}),
 });
 
+/**
+ * 两个矩形是否真的压在一起（相交面积大于 0）。
+ *
+ * 断言用的这份判定独立写在这里，不用被测代码导出的那份：复制一遍实现只会让断言自证。
+ * 只是边挨着边不算压到，间距正是靠这一点保证的。
+ */
+const overlaps = (a, b) =>
+    a.left < b.left + b.width &&
+    a.left + a.width > b.left &&
+    a.top < b.top + b.height &&
+    a.top + a.height > b.top;
+
 /** jsdom 不做布局，rect 一律是全零；这里按元素身份分别给出尺寸，定位逻辑才有可算的输入 */
-const stubRects = (window, anchorRect, panelRect) => {
+const stubRects = (window, initial) => {
+    // 桩做成可改的：重摆一次之后要让几何跟着变，才看得出面板是不是重摆过
+    const current = {anchor: initial.anchor, panel: initial.panel};
     window.HTMLElement.prototype.getBoundingClientRect = function() {
-        return this.hasAttribute("data-sue-panel") ? panelRect : anchorRect;
+        return this.hasAttribute("data-sue-panel") ? current.panel : current.anchor;
     };
+    return (rects) => Object.assign(current, rects);
 };
 
 /** 一组色块里被选中的那些；querySelectorAll 给的是 NodeList，先摊成数组 */
@@ -83,6 +98,24 @@ const selectedSwatches = (swatches) =>
  */
 const selectedCountIn = (section) =>
     selectedSwatches(section.querySelectorAll("[data-sue-color], [data-sue-follow-color]")).length;
+
+/**
+ * 摆一个选区：jsdom 里的 getSelection() 恒为空，Range.getBoundingClientRect 也不存在。
+ * 这里直接在 window 上装一个可改的 getSelection，矩形由调用方给出，
+ * 于是 placePanel 的选区测量这条路在 jsdom 里也走得通（几何仍由被测代码自己算）。
+ * 装上之后必须调 remove()，夹具的 close() 已经代为收摊。
+ */
+const stubSelection = (window, initial) => {
+    let box = initial;
+    window.getSelection = () => ({
+        rangeCount: box === null ? 0 : 1,
+        isCollapsed: box === null,
+        getRangeAt: () => ({getBoundingClientRect: () => box}),
+    });
+    return (next) => {
+        box = next;
+    };
+};
 
 const createFixture = (options = {}) => {
     const frontend = options.frontend ?? "desktop";
@@ -98,8 +131,14 @@ const createFixture = (options = {}) => {
     if (options.detachAnchor === true) {
         anchor.remove();
     }
+    let setRects = () => {};
     if (options.rects !== undefined) {
-        stubRects(window, options.rects.anchor, options.rects.panel);
+        setRects = stubRects(window, options.rects);
+    }
+    // 给出选区矩形；null 表示量不到选区（塌成一点或没有 Range）
+    let setSelection = () => {};
+    if (options.selection !== undefined) {
+        setSelection = stubSelection(window, options.selection);
     }
 
     const model = loadModule("src/model.ts");
@@ -107,8 +146,9 @@ const createFixture = (options = {}) => {
         dependencies: {siyuan: {getFrontend: () => frontend}},
         globals: {Node: window.Node, NodeFilter: window.NodeFilter},
     });
+    const placementModule = loadModule("src/placement.ts");
     const panelModule = loadModule("src/panel.ts", {
-        dependencies: {"./model": model, "./dom": domModule},
+        dependencies: {"./model": model, "./dom": domModule, "./placement": placementModule},
         globals: {document},
     });
 
@@ -178,6 +218,7 @@ const createFixture = (options = {}) => {
         panel,
         controller,
         model,
+        placement: placementModule,
         calls,
         section,
         switchOf,
@@ -197,6 +238,9 @@ const createFixture = (options = {}) => {
         countOf,
         fire,
         press,
+        // 改掉矩形桩 / 选区桩，用来验证面板在视口变化之后真的会重摆
+        setRects: (rects) => setRects(rects),
+        setSelection: (box) => setSelection(box),
         close: () => window.close(),
     };
 };
@@ -1016,6 +1060,300 @@ test("面板给出纵向滚动兜底，窗口太矮时不会被裁掉", () => {
     close();
 });
 
+// ------------------------------------------------------------------ 选区避让
+//
+// jsdom 不做布局，getBoundingClientRect() 一律全零，面板真正排出来什么样在这里是看不到的。
+// 因此把「往哪一侧摆」做成纯函数 choosePlacement：给它显式的矩形，它只回答这个决定，
+// 于是每一种情形都能用合成矩形走一遍，下面几节断言的也正是这个决定与随之写下的坐标。
+// 矩形桩由夹具显式给出（面板尺寸、选区、工具栏三样都是），所以坐标断言是这套输入的确定函数，不是空转。
+
+/** 视口（jsdom 默认 1024×768）与面板尺寸：与既有定位用例同一套，便于对照 */
+const VIEWPORT = {width: 1024, height: 768};
+const PANEL = {width: 300, height: 400};
+/** 与 panel.ts 里那两个常量同值 */
+const GAP = 8;
+const MARGIN = 12;
+
+/** 喂给纯函数的一组输入；参照矩形默认就取选区，与面板在有选区时的做法一致 */
+const placementInput = (selection, overrides = {}) => ({
+    viewport: overrides.viewport ?? VIEWPORT,
+    panel: overrides.panel ?? PANEL,
+    reference: overrides.reference ?? selection,
+    avoid: overrides.avoid === undefined ? selection : overrides.avoid,
+    gap: GAP,
+    margin: MARGIN,
+});
+
+/** 走一遍纯函数，并按它给的坐标补出面板矩形，用来独立核对有没有压住选区 */
+const place = (placement, selection, overrides = {}) => {
+    const input = placementInput(selection, overrides);
+    const chosen = placement.choosePlacement(input);
+    return {chosen, rect: {...input.panel, left: chosen.left, top: chosen.top}};
+};
+
+test("四个候选方向的先后就是优先级：下方、上方、右侧、左侧", () => {
+    // 候选表本身是契约的一部分：顺序决定了「都避得开时先挑哪一侧」与「同分时保留哪一个」
+    const {placement} = createFixture();
+    const candidates = placement.candidatesOf(placementInput(rect(300, 300, 200, 20)));
+    assert.deepEqual(
+        toHost(candidates.map((item) => item.side)),
+        ["below", "above", "right", "left"],
+    );
+});
+
+test("选区在视口顶部时面板落到选区下方，不压住这段文字", () => {
+    const {placement} = createFixture();
+    const selection = rect(300, 40, 400, 20);
+    const {chosen, rect: placed} = place(placement, selection);
+    assert.equal(chosen.side, "below");
+    assert.equal(overlaps(placed, selection), false, "面板与选区必须没有交集");
+    assert.ok(placed.top >= selection.top + selection.height, "面板整体在选区下方");
+    assert.equal(chosen.fits, true, "下方放得下");
+});
+
+test("选区在视口底部时面板落到选区上方，不压住这段文字", () => {
+    const {placement} = createFixture();
+    const selection = rect(300, 700, 400, 20);
+    const {chosen, rect: placed} = place(placement, selection);
+    assert.equal(chosen.side, "above");
+    assert.equal(overlaps(placed, selection), false);
+    assert.ok(placed.top + placed.height <= selection.top, "面板整体在选区上方");
+});
+
+test("高过面板的多行选区挪到右边，左右两侧都放不下时挪到左边", () => {
+    // 选区从上到下几乎铺满窗口：上下两侧都容不下 400px 高的面板，只能挪到旁边。
+    // 面板 300 宽再加 8 的间距与 12 的边距，右侧要空出 320，左侧要空出 312，因此选区两侧各留够
+    const {placement} = createFixture();
+    const tall = rect(330, 0, 340, 768);
+    const onRight = place(placement, tall);
+    assert.equal(onRight.chosen.side, "right", "右边还放得下，先去右边");
+    assert.equal(overlaps(onRight.rect, tall), false, "挪到右边也不能压住选区");
+
+    // 选区一路顶到右边缘：右边没有位置了，左边成为唯一不压住文字的落点
+    const flushRight = rect(712, 0, 312, 768);
+    const onLeft = place(placement, flushRight);
+    assert.equal(onLeft.chosen.side, "left", "右边放不下就去左边");
+    assert.equal(overlaps(onLeft.rect, flushRight), false);
+    assert.ok(onLeft.rect.left + onLeft.rect.width <= flushRight.left, "面板整体在选区左边");
+});
+
+test("左右两侧都放得下时优先选右边那一侧", () => {
+    const {placement} = createFixture();
+    const selection = rect(330, 0, 340, 768);
+    const {chosen, rect: placed} = place(placement, selection);
+    assert.equal(chosen.side, "right", "右边与左边都能避开时，按候选顺序取右边");
+    assert.equal(overlaps(placed, selection), false);
+});
+
+test("选区铺满窗口时四侧都压到，取候选顺序里的第一个", () => {
+    // 退化情形之一：选区占满整个视口，四个方向的夹取结果压住的面积完全相同
+    const {placement} = createFixture();
+    const selection = rect(0, 0, 1024, 768);
+    const input = placementInput(selection);
+    const {chosen, rect: placed} = place(placement, selection);
+    const candidates = placement.candidatesOf(input);
+    assert.ok(candidates.every((item) => item.overlap === candidates[0].overlap), "四侧压住的面积确实相同");
+    assert.deepEqual(toHost(chosen), toHost(candidates[0]), "同分时取候选顺序里的第一个");
+    assert.ok(chosen.overlap > 0, "避不开时如实报告压住了，而不是假装避开了");
+    assert.ok(overlaps(placed, selection), "退化情形下面板确实压住了选区");
+    assert.ok(placed.top >= MARGIN && placed.left >= MARGIN, "坐标仍然被夹在视口内");
+});
+
+test("四侧都压到选区时取压住最少的一侧，而不是固定取第一个", () => {
+    // 选区顶到左边缘、右侧又差 20px 放不下面板：四侧都压住，但右边只压到一条边
+    const {placement} = createFixture();
+    const selection = rect(0, 0, 724, 768);
+    const input = placementInput(selection);
+    const {chosen, rect: placed} = place(placement, selection);
+    const candidates = placement.candidatesOf(input);
+    assert.ok(candidates.every((item) => item.overlap > 0), "四侧都压住了");
+    const least = candidates.reduce((best, item) => (item.overlap < best.overlap ? item : best), candidates[0]);
+    assert.equal(chosen.side, "right", "重叠最小的一侧不是候选顺序里的第一个");
+    assert.deepEqual(toHost(chosen), toHost(least));
+    assert.ok(chosen.overlap < Math.max(...candidates.map((item) => item.overlap)), "确实比最差的一侧压得少");
+    // 右边被夹到视口边距上，与选区右缘之间正好剩一条 margin 宽的重叠
+    assert.equal(placed.left + placed.width, VIEWPORT.width - MARGIN, "右侧被夹在视口边距上");
+    assert.equal(selection.width - placed.left, MARGIN, "压住的正好是一条边距");
+});
+
+test("四侧都压到选区时结果是确定的：同一组输入算两次结果相同", () => {
+    const {placement} = createFixture();
+    const inputs = [
+        // 选区铺满窗口
+        placementInput(rect(0, 0, 1024, 768)),
+        // 选区高过视口
+        placementInput(rect(0, 0, 1024, 2000)),
+        // 窗口比面板还小
+        placementInput(rect(100, 100, 120, 40), {
+            viewport: {width: 320, height: 240},
+            panel: {width: 300, height: 400},
+        }),
+    ];
+    for (const input of inputs) {
+        const first = placement.choosePlacement(input);
+        const second = placement.choosePlacement(input);
+        assert.deepEqual(toHost(first), toHost(second), `同一组输入的两次结果必须一致：${first.side}`);
+    }
+});
+
+test("窗口比面板还小：四个方向夹取后落在同一块，按候选顺序取第一个", () => {
+    // 退化情形之二：面板比窗口还大，四个方向的夹取区间都被挤扁，落到同一块矩形上。
+    // 四者重叠相同，于是同分保留候选顺序里的前一个 —— 结果仍然是确定的
+    const {placement} = createFixture();
+    const selection = rect(100, 100, 120, 40);
+    const input = placementInput(selection, {viewport: {width: 320, height: 240}, panel: {width: 300, height: 400}});
+    const chosen = placement.choosePlacement(input);
+    const candidates = placement.candidatesOf(input);
+    const overlaps = candidates.map((item) => item.overlap);
+    assert.deepEqual([...new Set(overlaps)].length, 1, "四个方向压住的面积确实相同");
+    assert.equal(chosen.overlap, Math.min(...overlaps), "重叠最小的优先");
+    assert.equal(chosen.side, "below", "同分时取候选顺序里的第一个");
+    assert.equal(chosen.left, MARGIN);
+    assert.equal(chosen.top, MARGIN);
+});
+
+test("选区量不到时退回锚点定位：居中落在下方，与有选区时的规则一致", () => {
+    // 塌成一点或没有 Range 时量不到选区（宽度或高度为 0），此时没有需要避让的文字
+    const {placement} = createFixture();
+    const anchor = rect(300, 120, 200, 40);
+    const {chosen, rect: placed} = place(placement, anchor, {avoid: null, reference: anchor});
+    assert.equal(chosen.side, "below");
+    assert.equal(chosen.overlap, 0, "没有让开区时不该报重叠");
+    assert.equal(placed.left, 250, "横向仍按参照矩形居中");
+    assert.equal(placed.top, 168);
+});
+
+test("宽或高为 0 的让开矩形按没有选区处理", () => {
+    // 塌成一点的选区量出来宽或高为 0：拿它当让开区只会把面板无谓地推开
+    const {placement} = createFixture();
+    const caret = rect(400, 300, 0, 18);
+    const {chosen} = place(placement, caret);
+    assert.equal(chosen.overlap, 0, "零宽的让开区被忽略");
+});
+
+test("浮动工具栏压在选区上时，面板仍要让开整段选区而不是只躲开工具栏", () => {
+    // 工具栏容器常有一半落在选区里。只看工具栏的框，面板就会停在选区中间
+    const {panel, close} = createFixture({
+        rects: {anchor: rect(300, 120, 200, 40), panel: rect(0, 0, 300, 400)},
+        selection: rect(300, 100, 400, 100),
+    });
+    assert.equal(panel.style.left, "350px", "横向仍按选区居中");
+    assert.equal(panel.style.top, "208px", "下沿落在选区下沿之外，而不是工具栏下沿之外");
+    close();
+});
+
+test("选区贴着视口底部时面板翻到选区上方", () => {
+    const {panel, close} = createFixture({
+        rects: {anchor: rect(300, 700, 200, 40), panel: rect(0, 0, 300, 400)},
+        selection: rect(300, 690, 400, 60),
+    });
+    assert.equal(panel.style.top, "282px", "面板整体落在选区上方");
+    close();
+});
+
+test("选区高过面板时面板挪到选区右侧", () => {
+    const {panel, close} = createFixture({
+        rects: {anchor: rect(400, 200, 120, 40), panel: rect(0, 0, 300, 400)},
+        selection: rect(330, 0, 340, 768),
+    });
+    assert.equal(panel.style.left, "678px", "面板左沿落在选区右沿之外");
+    assert.equal(panel.style.top, "184px", "竖向与选区居中");
+    close();
+});
+
+// ------------------------------------------------------------------ 视口变化后重摆
+
+test("窗口缩放之后面板重摆一次", () => {
+    const {window, panel, setRects, close} = createFixture({
+        rects: {anchor: rect(300, 100, 200, 40), panel: rect(0, 0, 300, 400)},
+    });
+    assert.equal(panel.style.top, "148px", "夹具前提：先按开面板时的几何摆好");
+
+    // 缩放窗口会让选区与工具栏都挪位置，坐标不重算的话面板就留在原地
+    setRects({anchor: rect(300, 600, 200, 40), panel: rect(0, 0, 300, 400)});
+    window.dispatchEvent(new window.Event("resize"));
+    assert.equal(panel.style.top, "192px", "缩放之后按新的几何重摆");
+    close();
+});
+
+test("正文滚动之后面板重摆一次：滚动容器内部的滚动同样收得到", () => {
+    // 思源的每个编辑区各自是滚动容器，scroll 不冒泡，只有捕获阶段的监听才收得到
+    const {window, document, anchor, panel, setRects, close} = createFixture({
+        rects: {anchor: rect(300, 100, 200, 40), panel: rect(0, 0, 300, 400)},
+    });
+    assert.equal(panel.style.top, "148px");
+
+    setRects({anchor: rect(300, 500, 200, 40)});
+    anchor.dispatchEvent(new window.Event("scroll"));
+    assert.equal(panel.style.top, "92px", "编辑区内部滚动也要重摆（下沿放不下，翻到上方）");
+
+    setRects({anchor: rect(300, 200, 200, 40)});
+    window.dispatchEvent(new window.Event("scroll"));
+    assert.equal(panel.style.top, "248px", "整页滚动同样要重摆");
+    assert.ok(document.contains(panel));
+    close();
+});
+
+test("滚面板自己的内容不重摆：面板是滚动容器，滚它不该把面板挪走", () => {
+    const {window, panel, setRects, close} = createFixture({
+        rects: {anchor: rect(300, 100, 200, 40), panel: rect(0, 0, 300, 400)},
+    });
+    setRects({anchor: rect(300, 500, 200, 40)});
+    panel.dispatchEvent(new window.Event("scroll"));
+    assert.equal(panel.style.top, "148px", "面板内部的滚动不得反过来挪动面板");
+    close();
+});
+
+test("destroy 之后缩放与滚动都不再带着面板走", () => {
+    const {window, document, controller, panel, setRects, close} = createFixture({
+        rects: {anchor: rect(300, 100, 200, 40), panel: rect(0, 0, 300, 400)},
+    });
+    setRects({anchor: rect(300, 600, 200, 40)});
+    window.dispatchEvent(new window.Event("resize"));
+    assert.equal(panel.style.top, "192px", "夹具前提：销毁前视口监听是活的");
+
+    controller.destroy();
+    setRects({anchor: rect(300, 100, 200, 40)});
+    window.dispatchEvent(new window.Event("resize"));
+    window.dispatchEvent(new window.Event("scroll"));
+    document.body.dispatchEvent(new window.Event("scroll"));
+    assert.equal(panel.style.top, "192px", "销毁之后坐标不再被视口事件改动");
+    close();
+});
+
+test("坐标按文档坐标系写出：滚动偏移一并加上", () => {
+    // 面板是 body 上的绝对定位元素，left/top 是文档坐标；换算对两条出口同样成立
+    const moved = createFixture({
+        rects: {anchor: rect(300, 100, 200, 40), panel: rect(0, 0, 300, 400)},
+    });
+    assert.equal(moved.panel.style.top, "148px", "夹具前提：先按视口坐标摆好");
+    Object.defineProperty(moved.window, "scrollY", {value: 500, configurable: true});
+    moved.window.dispatchEvent(new moved.window.Event("scroll"));
+    assert.equal(moved.panel.style.top, "648px", "视口里位置没变，文档坐标要加上滚动偏移");
+    moved.close();
+
+    // 退回视口边距的那条出口也是文档坐标
+    const detached = createFixture({
+        rects: {anchor: rect(300, 120, 200, 40), panel: rect(0, 0, 300, 400)},
+        detachAnchor: true,
+    });
+    Object.defineProperty(detached.window, "scrollY", {value: 500, configurable: true});
+    detached.window.dispatchEvent(new detached.window.Event("scroll"));
+    assert.equal(detached.panel.style.top, "512px", "退回边距时同样加上滚动偏移");
+    detached.close();
+});
+
+test("移动端走同一套定位：面板同样避开整段选区", () => {
+    // 移动端与桌面端只有限高不同，定位没有单独的分支，避让规则因此是同一套
+    const {panel, close} = createFixture({
+        frontend: "mobile",
+        rects: {anchor: rect(300, 120, 200, 40), panel: rect(0, 0, 300, 300)},
+        selection: rect(300, 100, 400, 100),
+    });
+    assert.equal(panel.style.top, "208px", "面板下沿落在选区下沿之外");
+    close();
+});
+
 test("移动端前端改用 touchend 绑定，并给面板加上滚动兜底", () => {
     const {panel, document, styleSwatchesOf, fire, changes, lastChange, countOf, close} = createFixture({
         frontend: "mobile",
@@ -1224,4 +1562,35 @@ test("面板根有不透明表面，且不挂思源未定义的浮层类", () =>
         ["box-sizing", "border"],
         `颜色色块规则里只应有盒模型与边框：${declarations.join("; ")}`,
     );
+});
+
+// 定位与样式表是一对约定：placePanel 把面板夹进 [margin, 视口宽 - 面板宽 - margin]，
+// 而面板自己的最大宽度也只让出左右各一个 margin —— 两边对不上时，夹好的坐标反而把面板推出可视区。
+// 高度同理：面板必须只受 max-height 约束（由 panel.ts 按桌面/移动端分别给出），
+// 定死 height 的话窗口一矮面板就缩不下去，"避开文字" 只能退到越过视口边缘那一档。
+// jsdom 不应用样式表，因此这里核对样式表源码与 panel.ts 里那几个常量。
+test("面板根的尺寸约定与定位一致：最大宽度让出视口边距，高度只受 max-height 约束", () => {
+    const scss = readFileSync(new URL("../src/index.scss", import.meta.url), "utf8");
+    const root = /\[data-sue-panel\]\s*\{([^}]*)\}/.exec(scss);
+    assert.ok(root, "index.scss 里必须有 [data-sue-panel] 规则");
+    const body = root[1];
+
+    const panelSource = readFileSync(new URL("../src/panel.ts", import.meta.url), "utf8");
+    const margin = /const VIEWPORT_MARGIN = (\d+);/.exec(panelSource);
+    assert.ok(margin, "panel.ts 里必须能读出视口边距常量");
+    const edge = Number(margin[1]);
+    assert.match(
+        body,
+        new RegExp(`max-width:\\s*calc\\(100vw\\s*-\\s*${edge * 2}px\\)`),
+        `面板最大宽度必须让出左右各 ${edge}px 的视口边距`,
+    );
+
+    // 盒模型收住，量到的宽才是样式表写下的那个数
+    assert.match(body, /box-sizing:\s*border-box\s*;/, "[data-sue-panel] 必须收住盒模型");
+    // 不得定死高度：面板要能缩到 max-height，窗口矮过内容时才有得可缩
+    assert.ok(!/(^|[\s;])height\s*:/.test(body), `面板根不得定死高度：${body.replace(/\/\/.*$/gm, "").trim()}`);
+    // 限高与滚动兜底由 panel.ts 的内联样式给出，这里确认它们仍然在
+    assert.match(panelSource, /const MAX_HEIGHT = "\d+vh"/, "panel.ts 里必须给出桌面端限高常量");
+    assert.match(panelSource, /panel\.style\.maxHeight = mobile \? MOBILE_MAX_HEIGHT : MAX_HEIGHT;/);
+    assert.match(panelSource, /panel\.style\.overflowY = "auto"/, "面板仍须是纵向滚动容器");
 });
