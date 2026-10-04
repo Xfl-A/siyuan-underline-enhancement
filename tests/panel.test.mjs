@@ -440,6 +440,44 @@ test("选中项带 aria-pressed 与自定义 class，未选中项不带", () => 
     close();
 });
 
+test("默认配置打开面板时，下划线的直线色块就是选中态", () => {
+    // 用户报过「下划线开关默认开启，但没有出现下划线」。
+    // 面板默认 pair 就是「跟随文字颜色 + 直线」，因此首屏必须把 solid 摆成选中：
+    // 开关亮着、线型色块一个都不亮，用户无从判断当前到底是什么线
+    const {styleSwatchOf, styleSwatchesOf, switchOf, followSwatchOf, controller, close} = createFixture({
+        initialPair: DEFAULT_PAIR,
+    });
+    assert.deepEqual(toHost(controller.getPair()), DEFAULT_PAIR, "面板不得改动默认配置本身");
+
+    assert.equal(switchOf("underline").checked, true, "下划线开关默认是开的");
+    const solid = styleSwatchOf("underline", "solid");
+    assert.equal(solid.getAttribute("aria-pressed"), "true", "solid 色块默认必须选中");
+    assert.ok(solid.classList.contains("sue-swatch--selected"), "选中态 class 也要给，主题才能读出来");
+    assert.equal(solid.disabled, false, "方向开着，线型色块可点");
+    // 整排只允许一个选中项：solid 亮着而另一个也亮着，等于没有默认线型
+    const pressed = styleSwatchesOf("underline").filter((swatch) => swatch.getAttribute("aria-pressed") === "true");
+    assert.deepEqual(
+        pressed.map((swatch) => swatch.getAttribute("data-sue-style")),
+        ["solid"],
+        "默认线型有且只有 solid 一个",
+    );
+    // 默认色是跟随文字颜色，于是跟随色块也必须是选中态，整行才不会一个都没选中
+    assert.equal(followSwatchOf("underline").getAttribute("aria-pressed"), "true");
+    // 上划线默认关着：控件禁用但选中态仍按各自的配置画，不因此串到下划线那一行
+    assert.equal(switchOf("overline").checked, false);
+    assert.equal(styleSwatchOf("overline", "solid").getAttribute("aria-pressed"), "true");
+    assert.equal(styleSwatchOf("overline", "solid").disabled, true);
+    close();
+});
+
+test("默认 pair 下点直线色块不产生改动（它已经是当前线型）", () => {
+    // 首屏就选中 solid，点它等于没点意图；面板据此不回调，也不会白白重排一次装饰
+    const {styleSwatchOf, changes, close} = createFixture({initialPair: DEFAULT_PAIR});
+    styleSwatchOf("underline", "solid").click();
+    assert.equal(changes().length, 0, "点已选中的线型色块不应产生改动");
+    close();
+});
+
 // ------------------------------------------------------------------ 交互
 
 test("点击线型色块后 onChange 收到该方向的新线型，另一个方向不受影响", () => {

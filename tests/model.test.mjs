@@ -79,6 +79,91 @@ test("共享常量都被冻结，导入方改不到会话的回退底座", () =>
     assert.deepEqual(toHost(model.sanitizePair(null)), toHost(model.DEFAULT_PAIR));
 });
 
+// ---------------------------------------------------------------- 默认值
+
+// 规格 §4 的默认值：下划线开着、跟随文字颜色、直线；上划线关着。
+// 用户报过「下划线开关默认开启，但没有出现下划线」，因此这一串从常量到 CSS 到读回都被钉住。
+test("DEFAULT_PAIR 的下划线是跟随文字颜色的直线，上划线保持关闭", () => {
+    assert.deepEqual(DEFAULT_PAIR.underline, {enabled: true, style: "solid", color: ""});
+    assert.deepEqual(DEFAULT_PAIR.overline, {enabled: false, style: "solid", color: ""});
+    // 「跟随」在模型里的形态是空串：任何一个具体值都意味着不再是跟随
+    assert.equal(DEFAULT_PAIR.underline.color, "");
+    // 直线不是「碰巧的默认」，而是线型行里的第一个选项，两处必须一致
+    assert.equal(LINE_STYLES[0], "solid", "solid 是面板里的第一种线型");
+    assert.equal(DEFAULT_PAIR.underline.style, LINE_STYLES[0]);
+});
+
+test("默认下划线写出的 CSS 同时声明 line、style 与跟随色", () => {
+    // 写出侧不声明 line 就画不出线，不声明 style 时浏览器仍按 solid 画（但那是隐式的）：
+    // 三条都必须显式写出，落盘的 HTML 才不依赖阅读方的默认行为
+    const css = buildDecorationCSS(DEFAULT_PAIR.underline, "underline");
+    assert.ok(css.includes("text-decoration-line: underline"), `必须声明要画下划线：${css}`);
+    assert.ok(css.includes("text-decoration-style: solid"), `默认线型必须是 solid：${css}`);
+    assert.ok(
+        css.includes("text-decoration-color: currentColor"),
+        `跟随文字颜色必须显式写成 currentColor：${css}`,
+    );
+    assert.equal(
+        css,
+        "text-decoration-line: underline; text-decoration-style: solid; text-decoration-color: currentColor",
+    );
+    // 白名单与写出侧共用同一个常量，两边不会各写一份字面量而悄悄走岔
+    assert.equal(model.FOLLOW_COLOR_KEYWORD, "currentColor");
+});
+
+test("默认下划线经 composePair 落到文档上，读回来仍等于默认值", () => {
+    const specs = composePair(DEFAULT_PAIR);
+    assert.equal(specs.length, 1, "只有下划线开着，因此只产出一个 span");
+    assert.equal(specs[0].position, "underline");
+    const css = buildDecorationCSS(DEFAULT_PAIR.underline, "underline");
+    assert.equal(specs[0].css, css);
+    assert.deepEqual(readPairFromStyle(specs[0].css, null), DEFAULT_PAIR);
+    assert.equal(isSamePair(readPairFromStyle(css, null), DEFAULT_PAIR), true);
+});
+
+test("span 上没有 text-decoration-style 声明时，读回来按 solid 认", () => {
+    // 思源重渲染出来的 span 可能只剩 line 与 color；线型因此只能取自解析侧的兜底，
+    // 兜底若不是 solid，用户保存过的直线就会被读成别的线型，面板再打开时选中态也落在别的色块上
+    for (
+        const css of [
+            "text-decoration-line: underline",
+            "text-decoration-line: underline; text-decoration-color: currentColor",
+            "text-decoration: underline",
+        ]
+    ) {
+        const read = readPairFromStyle(css, null);
+        assert.equal(read.underline.enabled, true, `线型缺失时装饰仍然启用：${css}`);
+        assert.equal(read.underline.style, "solid", `线型缺失时按 solid 认：${css}`);
+    }
+    // 声明了非法线型时同样退回 solid，而不是把脏值带进模型
+    assert.equal(
+        parseDecorationStyle("text-decoration-line: underline; text-decoration-style: zigzag", "underline").style,
+        "solid",
+    );
+    assert.equal(
+        parseDecorationStyle("text-decoration-line: underline; text-decoration-style: currentColor", "underline").style,
+        "solid",
+    );
+});
+
+test("sanitizePair 无论收到什么，underline.style 都落在五个线型之内且默认仍是 solid", () => {
+    // loadData 读回的设置、面板回填、插件存储都是外部输入；style 一旦漏成空值，
+    // 写进文档的声明就成了 text-decoration-style: 空，浏览器退回 none，线就没了
+    for (const style of [undefined, null, "", "  ", "zigzag", "SOLID", 0, 1, {}, []]) {
+        const pair = sanitizePair({underline: {enabled: true, style, color: ""}, overline: undefined});
+        assert.equal(
+            LINE_STYLES.includes(pair.underline.style),
+            true,
+            `非法线型必须回退：${JSON.stringify(style)} → ${JSON.stringify(pair.underline.style)}`,
+        );
+        assert.equal(pair.underline.style, "solid", `回退值必须是 solid：${JSON.stringify(style)}`);
+        assert.ok(
+            buildDecorationCSS(pair.underline, "underline").includes("text-decoration-style: solid"),
+            "回退之后写出的声明必须真的带 solid",
+        );
+    }
+});
+
 // ---------------------------------------------------------------- composePair
 
 // spec 上不再有标记字段：装饰身份完全由 css 承载，读写两侧都从那几条声明上认它
