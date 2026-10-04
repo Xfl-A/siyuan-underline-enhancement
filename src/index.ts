@@ -282,8 +282,9 @@ export default class UnderlineEnhancement extends Plugin {
      * 每个分组各自读一遍选区内的装饰，不能只看第一个：跨块选区里只有第二块被装饰过时，
      * 拿着默认值开场会让用户第一下点击就把第二块的装饰改掉，而且看上去完全正常。
      *
-     * 方向不靠 span 的嵌套位置判断，而是交给 readPairFromStyle 从各自的 text-decoration-line 读：
-     * 嵌套时外层是上划线、内层是下划线，合并成一个 data-sue="b" 的 span 则同时供给两个方向。
+     * 方向不靠 span 的嵌套位置判断，而是从各自的 text-decoration-line 读：
+     * 嵌套时外层是上划线、内层是下划线；两个方向设置相同时思源会存成单个
+     * text-decoration-line: underline overline 的节点，同时供给两个方向。
      * 装饰只在选区范围内找：块里落在选区之外的装饰不描述当前这次选择。
      *
      * 各分组一致时就用那一份；不一致时取第一份有装饰的，并如实报出「混合」，

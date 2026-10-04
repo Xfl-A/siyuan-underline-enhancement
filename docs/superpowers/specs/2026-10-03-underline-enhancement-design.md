@@ -179,7 +179,11 @@ export interface IDecorationPair {
 
 ### 5.3 标记与识别
 
-插件产生的 span 带 `data-sue="u"` / `data-sue="o"` 标记，便于识别与剥离。该属性是**辅助标记**，样式本身完全由 inline style 承载 —— 即使插件未加载，装饰依然正确渲染。
+装饰**只由 inline style 承载**，插件不写任何自定义标记属性。即使插件未加载，装饰依然正确渲染。
+
+> **修订（2026-10-04）**：本节原设计为「span 带 `data-sue="u"` / `data-sue="o"` 辅助标记，便于识别与剥离」。实测证明该标记**无法存活落盘**：思源把块 HTML 解析成自己的 AST 存进 `.sy`，装饰变成
+> `NodeTextMark{"Properties":{"style":"text-decoration-line: …"}}`，`text-decoration-*` 原样保留，而 `data-sue` 被整个丢弃。块一旦存过，插件就再也认不出自己的装饰，清除与改样式全部静默失效。
+> 因此识别改为「`style` 里 `text-decoration-line` 含 `underline` / `overline` 的 span」，不写标记。方向本就编码在 `text-decoration-line` 里，标记是冗余的 —— 冗余的第二真相正是这个 bug 的成因。
 
 ### 5.4 焦点与选区
 

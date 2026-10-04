@@ -18,6 +18,7 @@
 - 「跟随文字颜色」的实现是**不输出** `text-decoration-color`，依赖 CSS `currentColor`。不得用 `currentColor` 字面量代替省略。
 - 颜色白名单：仅接受 `#rgb`、`#rgba`、`#rrggbb`、`#rrggbbaa`、`var(--b3-...)`。其余一律视为非法并回退为空字符串（跟随文字色）。这条是防 CSS 注入，不可放宽。
 - 装饰 span 必须带 `data-sue="u"`（下划线）或 `data-sue="o"`（上划线）标记属性；带 `data-sue="b"`（合并）表示同时承载两个方向。
+  **（已于 2026-10-04 作废）** 思源解析块 HTML 存 `.sy` 时会丢弃自定义属性，只把 `text-decoration-*` 原样存进 `NodeTextMark` 的 `Properties.style`。靠标记识别会让插件在块存过一次之后彻底认不出自己的装饰。改为按 `text-decoration-line` 识别，且不写标记。
 - 所有写入 inline style 的值必须先过 `sanitizeColor`，包括从 `loadData` 读回的设置。
 - 面板与编辑器交互的事件名必须经**本地** `getEventName()` 辅助函数取得（`src/dom.ts` 导出）：`getFrontend() === "mobile"` 返回 `"touchend"`，否则返回 `"click"`。
   **注意**：思源内部的 `getEventName`（`app/src/protyle/util/compatibility.ts`）并**未**导出到 petal 公开类型，不可从 `siyuan` 包 import；必须自己用 `getFrontend()` 实现。这是本计划唯一允许的移动端事件名来源。
@@ -309,7 +310,7 @@ export const getEventName = (): string;
 - `stripDecorationIn` 拆掉 `data-sue` span 后 `editableElement.textContent` **完全不变**（Review Focus 1、2）
 - `stripDecorationIn` 不动没有 `data-sue` 的 `<strong>` / `<a>`
 - `applySpansIn` 单 spec → 选中文本被包一层 span，未选中的相邻文字未被包
-- `applySpansIn` 双 spec（`o` 在前 `u` 在后）→ 产出嵌套结构，外层 `data-sue="o"`、内层 `data-sue="u"`
+- `applySpansIn` 双 spec（`o` 在前 `u` 在后）→ 产出嵌套结构，外层 `text-decoration-line: overline`、内层 `underline`（原写作 `data-sue` 标记，该机制已于 2026-10-04 作废，见上文）
 - `applySpansIn` 空 specs → 移除已有装饰
 - **`applySpansIn` 部分重叠**：先把 `abc` 整体加下划线，再对 `bc` 加新样式 → 结果 `a` 无装饰、`bc` 为新样式、文本内容不变（Review Focus 1）
 - `applySpansIn` 不产生空文本节点，且 `<strong>` 兄弟元素保持原有嵌套

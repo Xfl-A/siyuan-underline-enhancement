@@ -67,20 +67,28 @@
    `{notebookID}` 与 `{docID}` 是思源生成的目录名（如 `20200812220555-lj3enxa`），不是文档标题。
    在思源里打开测试文档，URL 上的 `?id=` 参数即 `{docID}`；笔记本 id 可在
    `{workspace}/data/.siyuan/conf.json` 里按目录名对应关系查到。
-3. 用文本编辑器打开该 `.sy` 文件。它是一个以块 id 为键的 JSON 对象，按块 id 找到刚才装饰过的那个块。
-4. **看这个块对象的 `content` 字段** —— 它就是块的内容 HTML。里面应能看到类似：
+3. 用文本编辑器打开该 `.sy` 文件。它**不是 HTML**，而是一个 JSON 对象 —— 思源存的是自己的 AST，不是块的内容 HTML。
+4. 找到刚才装饰过的那段文字所在的节点。装饰会变成一个 `NodeTextMark` 节点，形如：
 
-   ```html
-   <span data-sue="o" style="text-decoration-line: overline; text-decoration-style: solid; text-decoration-color: #0090ff">
-     <span data-sue="u" style="text-decoration-line: underline; text-decoration-style: wavy; text-decoration-color: #e5484d">被选中的文字</span>
-   </span>
+   ```json
+   {
+     "Type": "NodeTextMark",
+     "Properties": {
+       "style": "text-decoration-line: underline; text-decoration-style: wavy; text-decoration-color: #0090ff"
+     },
+     "TextMarkType": "text",
+     "TextMarkTextContent": "被选中的文字"
+   }
    ```
 
+   两个方向设置不同时会出现两个嵌套的 `NodeTextMark`（外层 `overline`、内层 `underline`）；
+   相同时只有一个，`text-decoration-line` 为 `underline overline`。
 5. 逐项核对：
-   * `style` 里的 `text-decoration-*` 声明与面板上的设置**逐字一致**（包括颜色值与 `var(--b3-...)` 主题变量）。
+   * `Properties.style` 里的 `text-decoration-*` 声明与面板上的设置**逐字一致**（包括颜色值与 `var(--b3-...)` 主题变量）。
    * 「跟随文字颜色」时**没有** `text-decoration-color` 声明（由 CSS 的 `currentColor` 生效）—— 出现即为错。
-   * 两个方向设置相同时只应有一个 `data-sue="b"` 的 span，其 `text-decoration-line` 为 `underline overline`；
-     不同时为嵌套两层，外层 `data-sue="o"`、内层 `data-sue="u"`。
+   * 装饰**只由 style 承载**：识别与清除完全依赖 `text-decoration-line`，不依赖任何自定义标记属性。
+     这不是风格偏好 —— 思源解析块 HTML 时会丢掉自定义属性，只把 style 原样存进 AST，
+     靠自定义属性识别装饰的插件在落盘后就再也认不出自己的装饰。
    * 文字本身没有被改写，也没有多出空壳块或重复块。
    * 关掉思源、重新启动后再次查看该 `.sy`，内容应完全不变。
 
@@ -118,12 +126,12 @@
 
 ## 7. 文档历史可回滚
 
-| 项       | 内容                                                                         |
-| -------- | ---------------------------------------------------------------------------- |
-| 步骤     | 装饰完成后打开**文档历史**，回滚到装饰之前的版本                             |
-| 预期结果 | 装饰被移除，正文其余内容不受影响；回滚后的 `.sy` 里不再有 `data-sue` 的 span |
-| 实际结果 | （待填）                                                                     |
-| 结论     | ☐ 通过　☐ 不通过                                                             |
+| 项       | 内容                                                                                                 |
+| -------- | ---------------------------------------------------------------------------------------------------- |
+| 步骤     | 装饰完成后打开**文档历史**，回滚到装饰之前的版本                                                     |
+| 预期结果 | 装饰被移除，正文其余内容不受影响；回滚后的 `.sy` 里不再有带 `text-decoration-line` 的 `NodeTextMark` |
+| 实际结果 | （待填）                                                                                             |
+| 结论     | ☐ 通过　☐ 不通过                                                                                     |
 
 ## 8. 同步到另一设备
 
