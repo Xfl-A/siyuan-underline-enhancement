@@ -406,14 +406,51 @@ test("onload 注入图标并注册带稳定标识的工具栏项", () => {
     assert.equal(typeof item.click, "function");
 });
 
-test("图标沿用 Lucide underline 的路径数据，并把描边宽度收到思源工具栏的粗细", () => {
+test("图标是带波浪下划线的字母 U，且描边属性仍写在 symbol 上", () => {
     const {UNDERLINE_ICON_SVG} = loadModule("src/icons.ts");
     assert.match(UNDERLINE_ICON_SVG, /viewBox="0 0 24 24"/);
+    // U 的那段路径取自 Lucide 的 underline，原样保留
     assert.match(UNDERLINE_ICON_SVG, /d="M6 4v6a6 6 0 0 0 12 0V4"/);
-    assert.match(UNDERLINE_ICON_SVG, /<line x1="4" x2="20" y1="20" y2="20"\/>/);
+    // 思源工具栏里本来就有一个直下划线按钮，两者必须靠波形区分开
+    assert.equal(
+        /<line[\s>]/.test(UNDERLINE_ICON_SVG),
+        false,
+        "波浪下划线不能用直线元素画，否则与思源自带的直下划线按钮长得一样",
+    );
+    const pathData = Array.from(UNDERLINE_ICON_SVG.matchAll(/\sd="([^"]+)"/g), (matched) => matched[1]);
+    assert.equal(pathData.length, 2, "图标由 U 与波浪两段路径组成");
+    // 波浪必须真的弯：至少一段路径带曲线命令
+    assert.ok(
+        pathData.some((data) => /[cqCQ]/.test(data)),
+        `下划线那段必须是曲线：${pathData.join(" | ")}`,
+    );
+    // 路径数据里不能有野数字：命令字母都得在 SVG 的命令集内，每个数字都得跟在某个命令后面，
+    // 且全部是有限数字。少写一个参数或写错一个字母，浏览器会把整段曲线整条丢弃
+    for (const data of pathData) {
+        let seenCommand = false;
+        for (const token of data.match(/[a-zA-Z]|[-+]?\d*\.?\d+(?:e[-+]?\d+)?/g) ?? []) {
+            if (/^[a-zA-Z]$/.test(token)) {
+                assert.match(token, /^[MmLlHhVvCcSsQqTtAaZz]$/, `未知的路径命令 ${token}：${data}`);
+                seenCommand = true;
+                continue;
+            }
+            assert.equal(seenCommand, true, `这个数字不属于任何命令：${token} 出现在 ${data}`);
+            assert.ok(Number.isFinite(Number(token)), `路径里不能出现非有限数字：${token} 出现在 ${data}`);
+        }
+    }
     // 思源对工具栏图标统一声明 fill: currentColor; stroke-width: 0，symbol 上必须自己再声明一次
     assert.match(UNDERLINE_ICON_SVG, /fill="none"/);
     assert.match(UNDERLINE_ICON_SVG, /stroke-width="1\.5"/);
+    assert.match(UNDERLINE_ICON_SVG, /stroke="currentColor"/, "描边跟随文字色，深浅主题才都对");
+    // 这三件事必须留在 <symbol> 上（继承自 svg 的声明优先级更低），落到别的元素上就失效了
+    const symbol = /<symbol\b([^>]*)>/.exec(UNDERLINE_ICON_SVG);
+    assert.ok(symbol, "图标必须是一个 symbol");
+    for (const attribute of ['fill="none"', 'stroke="currentColor"', 'stroke-width="1.5"']) {
+        assert.ok(
+            symbol[1].includes(attribute),
+            `${attribute} 必须留在 <symbol> 上：思源对 svg 的声明会继承进路径，优先级低于元素自身的表现属性`,
+        );
+    }
 });
 
 test("onunload 移除工具栏项", () => {
