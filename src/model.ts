@@ -94,6 +94,42 @@ export const isValidColor = (value: unknown): boolean => typeof value === "strin
 export const sanitizeColor = (value: unknown): string => (isValidColor(value) ? (value as string) : "");
 
 /**
+ * 计算色白名单：只收形状完整的 rgb() / rgba()，分量是 0–255 的整数，alpha 是 0–1 的小数且只配 rgba()。
+ * getComputedStyle 序列化出来的就是这个形状；关键词、var()、十六进制与带分号的字符串一律落在外面。
+ */
+const COMPUTED_COLOR_PATTERN = /^(rgba?)\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*(?:,\s*(0|1|0?\.\d+)\s*)?\)$/i;
+
+/** 颜色分量的上界：超出它的值不是浏览器算得出来的颜色 */
+const CHANNEL_MAX = 255;
+
+/**
+ * 返回合法的 rgb() / rgba() 原值，非法值退回空字符串。
+ *
+ * 与 sanitizeColor 分成两个白名单：这一路的值只落在面板自身的 inline style 上（给「跟随文字色」色块的字母上色），
+ * 不进文档 HTML，因此要的是 rgb()/rgba() 而不是十六进制或主题变量。
+ * 计算色同样可能是脏字符串，所以它自己也得过一道形状校验，而不是直接写进 style。
+ */
+export const sanitizeComputedColor = (value: unknown): string => {
+    if (typeof value !== "string") {
+        return "";
+    }
+    const matched = COMPUTED_COLOR_PATTERN.exec(value);
+    if (matched === null) {
+        return "";
+    }
+    const [, name, red, green, blue, alpha] = matched;
+    // alpha 只在 rgba() 里合法：rgb() 带第四个分量、rgba() 缺 alpha 都不是合法写法
+    if ((name.toLowerCase() === "rgba") !== (alpha !== undefined)) {
+        return "";
+    }
+    const channels = [red, green, blue].map((channel) => Number(channel));
+    if (channels.some((channel) => channel > CHANNEL_MAX)) {
+        return "";
+    }
+    return value;
+};
+
+/**
  * 按分号切分 CSS 声明列表。引号内与圆括号内的分号不是分隔符：
  * 直接 split(";") 会把 url("a;b") 截断，让值里伪装的声明混入解析结果。
  */

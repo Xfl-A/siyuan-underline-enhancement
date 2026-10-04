@@ -19,6 +19,7 @@ import {
     captureOffsets,
     collectEditableGroups,
     readDecorationStylesIn,
+    readFirstTextColor,
     reclaimEditableElement,
     restoreOffsets,
 } from "./dom";
@@ -174,11 +175,15 @@ export default class UnderlineEnhancement extends Plugin {
             this.closePanel();
         };
         const current = this.readCurrentPair();
+        // 「跟随文字色」色块上的字母要显出装饰真正会取到的那个颜色，值只能从选中的文字上读；
+        // 跨多个区域时取第一组：这一项的效果本来就只能给出一个颜色
+        const followTextColor = readFirstTextColor(this.groups[0].editableElement);
         this.panelOptions = {
             anchor: toolbar.element,
             initialPair: current.pair,
             i18n: this.i18n as Record<string, string>,
             undoEnabled: hasUndoableChange(),
+            followTextColor,
             // 选区里各区域的装饰不一致：面板要先说明再让用户点，
             // 否则第一下点击就会把没打算动的区域一并改写
             mixed: current.mixed,

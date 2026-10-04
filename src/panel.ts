@@ -14,6 +14,7 @@ import {
     PRESET_COLORS,
     isSamePair,
     sanitizeColor,
+    sanitizeComputedColor,
     sanitizePair,
 } from "./model";
 import type {
@@ -31,6 +32,11 @@ export interface IPanelOptions {
     i18n: Record<string, string>;
     /** 撤销按钮是否可用；撤销栈本身只有 src/index.ts 知道 */
     undoEnabled: boolean;
+    /**
+     * 选中文字的计算颜色，给「跟随文字色」色块上的字母上色。
+     * 由调用方从选区里读一次；空值或非法值一律不上色，字母保持继承面板的正文色。
+     */
+    followTextColor?: string;
     /**
      * 选区里的各区域装饰并不一致，initialPair 只是其中一份。
      * 面板据此先说明再让用户点：一次改动会把整个选区统一成面板当前这一份配置，
@@ -244,11 +250,13 @@ const createColorSwatch = (doc: Document, color: string): HTMLButtonElement => {
 };
 
 /**
- * 「跟随文字色」色块：字母 A 表示继承正文色，背景透明。
- * 文字色刻意不设，让它跟着面板的正文色走 —— 装饰那边靠省略 text-decoration-color 实现，
- * 这里让色块自己演示同一个效果。
+ * 「跟随文字色」色块：字母 A 表示装饰省略 text-decoration-color 后真正会取到的那个颜色，背景透明。
+ *
+ * A 用选中文字的计算色上色——不显出那个颜色，这个色块就等于没有预览，装饰落到文字上的效果也无从预期。
+ * 这个值过不了计算色白名单就一个属性都不写：继承来的颜色仍然读得出来，
+ * 而把脏值写进 style 只会换来一条谁也没打算声明的规则。
  */
-const createFollowSwatch = (doc: Document, title: string): HTMLButtonElement => {
+const createFollowSwatch = (doc: Document, title: string, followTextColor: string): HTMLButtonElement => {
     const swatch = createElement<HTMLButtonElement>(doc, "button", `${BUTTON_CLASS} ${SWATCH_CLASS}`);
     swatch.type = "button";
     swatch.setAttribute(FOLLOW_ATTRIBUTE, "");
@@ -257,6 +265,11 @@ const createFollowSwatch = (doc: Document, title: string): HTMLButtonElement => 
     swatch.title = title;
     // 面板常量而非外部输入，因此不必过白名单（白名单只收十六进制与思源主题变量）
     swatch.style.backgroundColor = TRANSPARENT;
+    // 只写过了白名单的值；计算色不进文档 HTML，但仍然要先过 sanitizeComputedColor 才能落到 DOM 上
+    const safeColor = sanitizeComputedColor(followTextColor);
+    if (safeColor !== "") {
+        swatch.style.color = safeColor;
+    }
     return swatch;
 };
 
@@ -306,6 +319,7 @@ const buildSection = (
     doc: Document,
     direction: TDirection,
     translate: (key: string) => string,
+    followTextColor: string,
 ): ISectionWidgets => {
     const section = createElement(doc, "section", SECTION_CLASS);
     section.setAttribute(SECTION_ATTRIBUTE, direction);
@@ -329,7 +343,7 @@ const buildSection = (
     section.appendChild(styleRow.row);
 
     const colorRow = createRow(doc, "color", translate("color"), "", SWATCHES_CLASS);
-    const followSwatch = createFollowSwatch(doc, translate("followTextColor"));
+    const followSwatch = createFollowSwatch(doc, translate("followTextColor"), followTextColor);
     colorRow.control.appendChild(followSwatch);
     const colorSwatches = PRESET_COLORS.map((color) => createColorSwatch(doc, color));
     for (const swatch of colorSwatches) {
@@ -503,8 +517,8 @@ export const createPanel = (options: IPanelOptions): IPanelController => {
     panel.appendChild(mixedHint);
 
     const sections: Record<TDirection, ISectionWidgets> = {
-        underline: buildSection(ownerDocument, "underline", translate),
-        overline: buildSection(ownerDocument, "overline", translate),
+        underline: buildSection(ownerDocument, "underline", translate, options.followTextColor ?? ""),
+        overline: buildSection(ownerDocument, "overline", translate, options.followTextColor ?? ""),
     };
     panel.appendChild(sections.underline.section);
     panel.appendChild(sections.overline.section);

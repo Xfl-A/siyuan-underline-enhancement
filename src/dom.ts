@@ -483,6 +483,23 @@ export const applySpansIn = (editableElement: HTMLElement, start: number, end: n
     cleanupIn(editableElement);
 };
 
+/**
+ * 区域内第一个文本节点所在元素的计算颜色；没有文本节点或读不到计算样式时返回空字符串。
+ * getComputedStyle 从元素所在文档的 defaultView 上取：本模块不持有 window 引用，跟着文档走才不会落空。
+ */
+export const readFirstTextColor = (root: HTMLElement): string => {
+    if (!root) {
+        return "";
+    }
+    const walker = root.ownerDocument?.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const parent = (walker?.nextNode() as Text | null)?.parentElement;
+    const view = parent?.ownerDocument?.defaultView;
+    if (!parent || !view?.getComputedStyle) {
+        return "";
+    }
+    return view.getComputedStyle(parent).color ?? "";
+};
+
 /** 记下选区在各个可编辑区域里的字符偏移；DOM 改动后原 Range 会失效，靠它重建 */
 export const captureOffsets = (range: Range): Array<[HTMLElement, number, number]> => {
     return collectEditableGroups(range).map((group) => {

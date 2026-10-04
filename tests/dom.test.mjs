@@ -13,6 +13,7 @@ const {
     restoreOffsets,
     reclaimEditableElement,
     readDecorationStylesIn,
+    readFirstTextColor,
     getEventName,
 } = module;
 
@@ -968,6 +969,37 @@ test("readDecorationStylesIn reads what the selection really covers, at both bou
     assert.deepEqual(toHost(readDecorationStylesIn(paragraph, 9, 15)), [DOTTED_CSS], "压住后半截算相交");
     assert.deepEqual(toHost(readDecorationStylesIn(paragraph, 6, 12)), [DOTTED_CSS], "压住前半截算相交");
     assert.deepEqual(toHost(readDecorationStylesIn(paragraph, 6, 15)), [DOTTED_CSS], "整段压在装饰上算相交");
+    cleanup();
+});
+
+// ---------------------------------------------------------------- readFirstTextColor
+
+test("readFirstTextColor reads the layer the first text node sits in, not the outermost one", () => {
+    // 面板的「跟随文字色」色块要用这个值给字母 A 上色：装饰落到文字上时取到的就是它
+    const cleanup = mount(editor(
+        '<p data-type="text" data-node-id="p1" style="color: #123456">plain<em style="color: rgb(1, 2, 3)">bold</em></p>',
+    ));
+    const paragraph = document.querySelector("p");
+    const emphasized = paragraph.querySelector("em");
+
+    // 首个文本节点是段落自己的 plain，读到的就是段落的计算色
+    assert.equal(readFirstTextColor(paragraph), window.getComputedStyle(paragraph).color);
+    assert.match(readFirstTextColor(paragraph), /^rgb\(/, "浏览器把计算色序列化成 rgb()");
+    // 可编辑区域就是行内元素本身时，读到的是那一层的颜色
+    assert.equal(readFirstTextColor(emphasized), "rgb(1, 2, 3)");
+    cleanup();
+});
+
+test("readFirstTextColor returns an empty string when the region holds no text node", () => {
+    // 没有文本节点就没有「这段文字是什么颜色」可言；面板据此不上色，字母保持继承
+    const cleanup = mount(editor(
+        '<p data-type="text" data-node-id="p1"></p><p data-type="text" data-node-id="p2"><em></em></p>',
+    ));
+    const [blank, emptyInline] = document.querySelectorAll("p");
+
+    assert.equal(readFirstTextColor(blank), "");
+    assert.equal(readFirstTextColor(emptyInline), "", "只有空元素也算没有文本节点");
+    assert.equal(readFirstTextColor(emptyInline.querySelector("em")), "");
     cleanup();
 });
 

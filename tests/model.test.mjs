@@ -15,7 +15,7 @@ const wrap = (callback) => (...args) => toHost(callback(...args));
 const LINE_STYLES = toHost(model.LINE_STYLES);
 const PRESET_COLORS = toHost(model.PRESET_COLORS);
 const DEFAULT_PAIR = toHost(model.DEFAULT_PAIR);
-const {isValidColor, sanitizeColor, isSamePair} = model;
+const {isValidColor, sanitizeColor, sanitizeComputedColor, isSamePair} = model;
 const sanitizePair = wrap(model.sanitizePair);
 const buildDecorationCSS = wrap(model.buildDecorationCSS);
 const composePair = wrap(model.composePair);
@@ -216,6 +216,66 @@ test("sanitizeColor rejects values that are not strings", () => {
     for (const value of [42, null, undefined, true, {}, ["#abc"], () => "#abc"]) {
         assert.equal(sanitizeColor(value), "");
         assert.equal(isValidColor(value), false);
+    }
+});
+
+// ---------------------------------------------------------------- sanitizeComputedColor
+
+test("sanitizeComputedColor 放行 getComputedStyle 序列化出来的 rgb()/rgba()", () => {
+    // 白名单要跟浏览器实际的输出一致：算出来的颜色就是这个形状，挡掉它等于把真实颜色全挡掉
+    for (const value of ["rgb(255, 0, 0)", "rgba(1, 2, 3, 0.5)", "rgb(0, 0, 0)", "rgba(9, 9, 9, 0)"]) {
+        assert.equal(sanitizeComputedColor(value), value, `必须原样放行：${value}`);
+    }
+    assert.equal(sanitizeComputedColor("rgb(1,2,3)"), "rgb(1,2,3)", "分量之间没有空格也是合法写法");
+    assert.equal(sanitizeComputedColor("rgba(1, 2, 3, .5)"), "rgba(1, 2, 3, .5)", "alpha 可以省掉整数部分的 0");
+});
+
+test("sanitizeComputedColor 拒绝白名单之外的一切写法", () => {
+    // 白名单（十六进制与 var()）只收文档 HTML 里的颜色，计算色不走那条路：这两者必须各自成一道防线
+    for (const value of ["", "red", "var(--x)", "#fff", "#aabbcc", "currentColor", "transparent", "canvastext"]) {
+        assert.equal(sanitizeComputedColor(value), "", `必须拒绝：${value}`);
+    }
+    // 形状不完整的 rgb()/rgba()：少分量、带百分号、用空格分隔、带新式斜杠写法，都不是浏览器会输出的形状
+    for (
+        const value of [
+            "rgb(1, 2)",
+            "rgb(1, 2, 3, 0.5)",
+            "rgba(1, 2, 3)",
+            "rgba(1, 2, 3, 50%)",
+            "rgb(100%, 0%, 0%)",
+            "rgb(1 2 3)",
+            "rgba(1 2 3 / 50%)",
+            "rgb(256, 0, 0)",
+            "rgb(300, 0, 0)",
+            "rgb(0, 0, 0",
+            "rgb 1, 2, 3)",
+        ]
+    ) {
+        assert.equal(sanitizeComputedColor(value), "", `必须拒绝：${value}`);
+    }
+});
+
+test("sanitizeComputedColor 拒绝任何夹带第二条声明或外链的字符串", () => {
+    // 这个值来自 getComputedStyle，本身不该是脏的；但面板是把它写进 DOM 的第一个地方，防线得落在这里
+    const attacks = [
+        "rgb(1,2,3); color:url(evil)",
+        "rgb(1, 2, 3);position:fixed",
+        "rgba(1,2,3,0.5)}#abc{color:red",
+        "url(javascript:alert(1))",
+        "rgb(1,2,3);background:url(evil)",
+        "expression(alert(1))",
+        " rgb(1, 2, 3)",
+        "rgb(1, 2, 3) ",
+        "rgb(1, 2, 3)\n",
+    ];
+    for (const attack of attacks) {
+        assert.equal(sanitizeComputedColor(attack), "", `必须拒绝：${attack}`);
+    }
+});
+
+test("sanitizeComputedColor 拒绝非字符串输入", () => {
+    for (const value of [42, null, undefined, true, {}, ["rgb(1, 2, 3)"], () => "rgb(1, 2, 3)"]) {
+        assert.equal(sanitizeComputedColor(value), "");
     }
 });
 

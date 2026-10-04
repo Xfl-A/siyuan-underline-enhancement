@@ -120,6 +120,8 @@ const createFixture = (options = {}) => {
         i18n: options.i18n ?? i18n,
         undoEnabled: options.undoEnabled ?? false,
         mixed: options.mixed === true,
+        // 不给就传 undefined：面板必须自己判断这个值能不能用，而不是当成字符串收下
+        followTextColor: options.followTextColor,
         onChange: (pair) => calls.push({type: "change", pair: toHost(pair)}),
         onClear: () => calls.push({type: "clear"}),
         onUndo: () => calls.push({type: "undo"}),
@@ -228,6 +230,50 @@ test("面板含两个方向区块，各带开关、5 个线型色块、跟随文
         assert.equal(customInputOf(direction).type, "color", "每个方向都要有自定义取色器");
     }
     close();
+});
+
+test("「跟随文字色」色块用选中文字的计算色给 A 上色", () => {
+    // 这个选项的全部意义就是预览装饰将要取到的颜色；A 显不出那个颜色，色块等于没有预览
+    const computed = "rgb(18, 52, 86)";
+    const {panel, followSwatchOf, close} = createFixture({followTextColor: computed});
+    for (const direction of ["underline", "overline"]) {
+        const follow = followSwatchOf(direction);
+        assert.equal(follow.style.color, computed, `${direction} 区块的字母 A 用了真实文字色`);
+        assert.match(follow.getAttribute("style"), /(^|;)\s*color:\s*rgb\(18, 52, 86\);?$/);
+    }
+    // 这个值只落在色块自己的 color 上：混进 text-decoration 就会跟着装饰一起进文档 HTML，
+    // 而白名单只认十六进制与主题变量，保存前会被整条丢掉，界面与落盘结果就此对不上
+    assert.ok(!panel.outerHTML.includes(`text-decoration-color: ${computed}`), "计算色不得混进装饰的声明");
+    assert.ok(!panel.outerHTML.includes(`data-sue-color="${computed}"`), "计算色不得挂到颜色色块的属性上");
+    close();
+});
+
+test("没给出文字色或值非法时都不写 color，字母保持继承", () => {
+    const {followSwatchOf, close} = createFixture();
+    for (const direction of ["underline", "overline"]) {
+        assert.equal(followSwatchOf(direction).style.color, "", "没给出文字色时一个属性都不写");
+    }
+    close();
+
+    // 计算色来自 getComputedStyle，本身不该是脏的；但面板是把它写进 DOM 的第一个地方，脏值必须在这里被挡掉
+    for (
+        const value of [
+            "red",
+            "var(--b3-font-color)",
+            "#e5484d",
+            "rgb(1, 2, 3); color: url(evil)",
+            "url(evil)",
+            "rgb(1, 2, 3) ; position: fixed",
+        ]
+    ) {
+        const {panel, followSwatchOf: followOf, close: closePanel} = createFixture({followTextColor: value});
+        for (const direction of ["underline", "overline"]) {
+            assert.equal(followOf(direction).style.color, "", `脏值不得写进 style：${value}`);
+        }
+        assert.ok(!panel.outerHTML.includes("url("), `脏值不得留在面板标记里：${value}`);
+        assert.ok(!panel.outerHTML.includes("position: fixed"), `脏值不得留在面板标记里：${value}`);
+        closePanel();
+    }
 });
 
 test("线型色块靠元素自身的 text-decoration 画出真实的线", () => {
@@ -909,5 +955,19 @@ test("面板根有不透明表面，且不挂思源未定义的浮层类", () =>
     assert.ok(
         !code.includes("b3-popover"),
         "panel.ts 的代码不得引用思源不存在的 b3-popover：面板会失去背景",
+    );
+
+    // 「跟随文字色」色块背景透明，A 用的是选中文字的真实颜色；而选中文字本身就可能是白色，
+    // 白 A 画在白面板上照样看不见 —— 它自己那圈虚线是唯一还能看见的东西，不能没有。
+    // 属性名以 panel.ts 实际写出的那个为准（不一致就说明选择器已经对不上元素了）
+    assert.match(panelSource, /const FOLLOW_ATTRIBUTE = "([^"]+)"/, "panel.ts 里必须有跟随文字色色块的标记常量");
+    const followAttribute = /const FOLLOW_ATTRIBUTE = "([^"]+)"/.exec(panelSource)[1];
+    const follow = new RegExp(`\\[${followAttribute}\\]\\s*\\{([^}]*)\\}`).exec(scss);
+    assert.ok(follow, `index.scss 里必须有 [${followAttribute}] 规则`);
+    assert.match(follow[1], /\bborder:\s*[^;]+;/, "跟随文字色色块缺少 border 声明");
+    assert.match(
+        follow[1],
+        /border:\s*1px\s+dashed\s+var\(--b3-/,
+        "这圈边框必须带主题变量兜底，且用虚线与实心颜色块区分开",
     );
 });

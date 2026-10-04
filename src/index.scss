@@ -72,6 +72,14 @@
   width: 34px;
 }
 
+/* 「跟随文字颜色」色块：背景刻意透明，A 用选中文字的真实颜色上色（由 panel.ts 写入）。
+   但选中文字本身可能就是白色，白字画在白面板上照样看不见，补一圈虚线标出可点击区域，
+   同时和右边那排实心颜色块形成「未指定颜色」的区分 */
+[data-sue-panel] [data-sue-follow-color] {
+  box-sizing: border-box;
+  border: 1px dashed var(--b3-border-color, #e0e0e0);
+}
+
 /* 选中态：向外扩一圈，不盖住色块自身的颜色 */
 [data-sue-panel] .sue-swatch--selected {
   box-shadow: 0 0 0 2px var(--b3-primary-color, var(--b3-theme-color, currentColor));
