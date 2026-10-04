@@ -194,7 +194,7 @@ const createFixture = (options = {}) => {
         globals: {document, setTimeout, clearTimeout},
     });
     const panelModule = loadModule("src/panel.ts", {
-        dependencies: {"./model": model, "./dom": domModule},
+        dependencies: {"./model": model, "./dom": domModule, "./placement": loadModule("src/placement.ts")},
         globals: {document, setTimeout, clearTimeout},
     });
     const indexModule = loadModule("src/index.ts", {
@@ -354,6 +354,28 @@ const createFixture = (options = {}) => {
         return element;
     };
 
+    /**
+     * 面板开着期间块的内容被换短：打开面板时记下的字符偏移因此越出了区域当前的内容。
+     *
+     * jsdom 不会模拟思源的重渲染，也不会模拟用户在编辑器里改写，因此这一形态由夹具显式摆出。
+     * 触发它的可以是思源，也可以是用户自己 —— 这里只关心一个事实：
+     * 面板记下的那对偏移已经不再对应任何字符。
+     */
+    const shrinkBlock = (blockId, text) => {
+        const element = block(blockId);
+        assert.ok(element, `块 ${blockId} 应当还在文档里`);
+        element.textContent = text;
+        return element;
+    };
+
+    /** 块被删除：面板记下的那对偏移已经不对应文档里的任何东西 */
+    const removeBlock = (blockId) => {
+        const element = block(blockId);
+        assert.ok(element, `块 ${blockId} 应当还在文档里`);
+        element.remove();
+        return element;
+    };
+
     return {
         document,
         calls,
@@ -384,6 +406,8 @@ const createFixture = (options = {}) => {
         press,
         toggle,
         rerender,
+        shrinkBlock,
+        removeBlock,
         requestedI18NKeys: () => [...new Set(requestedI18NKeys)],
         respondWith: (...queued) => {
             responses = responses.concat(queued);
@@ -594,9 +618,13 @@ test("插件用到的每个 i18n 键在两种语言的真实文件里都存在",
     f.clickToolbarItem();
     f.click(f.styleSwatchOf("underline", "wavy"));
     await settle();
+    // 再走一次「记下的坐标对不上」的分支：那条提示也是插件会取的键，同样要过这道检查
+    f.shrinkBlock(BLOCK_A, "ab");
+    f.click(f.styleSwatchOf("underline", "dotted"));
     const keys = f.requestedI18NKeys();
     assert.ok(keys.includes("underlineEnhancement"), "工具栏提示应当取自 i18n");
     assert.ok(keys.includes("saveFailed"), "保存失败提示应当取自 i18n");
+    assert.ok(keys.includes("selectionChanged"), "坐标对不上的提示应当取自 i18n");
     for (const locale of ["zh-CN", "en"]) {
         const table = readLocale(locale);
         for (const key of keys) {
@@ -987,6 +1015,112 @@ test("重渲染之后的改动只写活着的块，脱管的那一份不会被�
     const firstBlockPosts = f.posts.filter((post) => post.data.id === BLOCK_A);
     assert.equal(firstBlockPosts.length, 2, "重渲染之后的第一段仍然要发请求");
     assert.equal(firstBlockPosts[1].data.data, f.block(BLOCK_A).outerHTML);
+});
+
+// -------------------------- 面板开着期间，记下的字符偏移不再对应区域当前的内容
+
+/**
+ * 包裹装饰之前必须先确认记下的偏移还落在区域当前的内容之内。
+ *
+ * 这些用例直接把块的内容在面板开着期间换短或删掉：记下的 [start, end) 因此越界，
+ * 而 locate 会把越界的端点悄悄夹到区域末尾，extractContents 于是取出另一段内容，
+ * 那一段会被原样写进磁盘。它们钉的是「宁可什么都不做，也不改用户的文档」。
+ * jsdom 不会模拟思源的重渲染或用户的改写，这一形态由 shrinkBlock / removeBlock 显式摆出。
+ */
+test("记下的偏移越出内容时整次放弃：文档不动、不落盘，并提示用户", async () => {
+    // 这是本次改动里最重要的一条：它钉住的是「用户的文字绝不会被截断后写进磁盘」
+    const f = createFixture();
+    f.plugin.onload();
+    await f.plugin.onLayoutReady();
+    f.clickToolbarItem();
+    assert.equal(f.plugin.groups[0].end, 5, "前置条件：面板记下的偏移是 (0, 5)");
+
+    // 内容被换短到只剩 2 个字符，记下的 (0, 5) 越界
+    f.shrinkBlock(BLOCK_A, "ab");
+    const beforeClick = f.blockHTML(BLOCK_A);
+    f.click(f.styleSwatchOf("underline", "wavy"));
+    await settle();
+
+    assert.equal(f.blockHTML(BLOCK_A), beforeClick, "越界的坐标一个字节都不许落到文档上");
+    assert.equal(HAS_DECORATION_SPAN.test(f.blockHTML(BLOCK_A)), false, "不该凭空多出装饰");
+    assert.equal(f.block(BLOCK_A).textContent, "ab", "块里的文字必须原样保留");
+    assert.deepEqual(f.posts, [], "越界的坐标不得变成一次落盘");
+    assert.deepEqual(f.calls.messages, ["⟦selectionChanged⟧"], "必须明确告诉用户这次没有改动");
+    // 没有改动就没有可回滚的东西：撤销栈里不该多出一条按不动的记录
+    assert.equal(f.actionButton("undo").disabled, true);
+});
+
+test("跨块选区里只有一组越界时整次放弃：另一段也不落盘", async () => {
+    const f = createFixture({blocks: TWO_BLOCKS_HTML});
+    f.plugin.onload();
+    await f.plugin.onLayoutReady();
+    f.clickToolbarItem(f.protyleOf(f.crossRange()));
+
+    // 只有第二段变短：一次操作要覆盖全部区域，因此不能只改掉仍然对得上的那一段
+    f.shrinkBlock(BLOCK_B, "wo");
+    const untouchedHTML = f.blockHTML(BLOCK_A);
+    f.click(f.styleSwatchOf("underline", "wavy"));
+    await settle();
+
+    assert.deepEqual(f.posts, [], "半途而废的改动一个块都不许落盘");
+    assert.equal(f.blockHTML(BLOCK_A), untouchedHTML, "仍然对得上的一段也原样不动");
+    assert.equal(HAS_DECORATION_SPAN.test(f.blockHTML(BLOCK_A)), false);
+    assert.equal(f.blockHTML(BLOCK_B), `<p data-type="text" data-node-id="${BLOCK_B}">wo</p>`);
+    assert.deepEqual(f.calls.messages, ["⟦selectionChanged⟧"]);
+});
+
+test("块被删除之后记下的坐标整次放弃：不落盘，并提示用户", async () => {
+    const f = createFixture({blocks: TWO_BLOCKS_HTML});
+    f.plugin.onload();
+    await f.plugin.onLayoutReady();
+    f.clickToolbarItem(f.protyleOf(f.crossRange()));
+    const survivingHTML = f.blockHTML(BLOCK_A);
+
+    f.removeBlock(BLOCK_B);
+    const editorHTML = f.document.getElementById("editor").innerHTML;
+    f.click(f.styleSwatchOf("underline", "wavy"));
+    await settle();
+
+    // 块没了不是理由：拿脱管节点去改再发出去，改的是一份已经不存在的副本
+    assert.deepEqual(f.posts, [], "不得对着已经删掉的块发请求");
+    assert.equal(f.blockHTML(BLOCK_A), survivingHTML, "还在的块同样不动");
+    assert.equal(f.document.getElementById("editor").innerHTML, editorHTML, "编辑器里一个字节都不许变");
+    assert.deepEqual(f.calls.messages, ["⟦selectionChanged⟧"]);
+});
+
+test("记下的偏移仍然对得上时照常改动并落盘", async () => {
+    const f = createFixture();
+    f.plugin.onload();
+    await f.plugin.onLayoutReady();
+    f.clickToolbarItem();
+
+    f.click(f.styleSwatchOf("underline", "wavy"));
+    assert.match(f.blockHTML(BLOCK_A), DECORATED_UNDERLINE);
+    await settle();
+    // 对得上的坐标照旧一路走到 updateBlock：这道闸不能把正常功能也拦下来
+    assert.deepEqual(f.posts.map((post) => post.url), [UPDATE_BLOCK_API]);
+    assert.equal(f.posts[0].data.id, BLOCK_A);
+    assert.equal(f.posts[0].data.dataType, "dom");
+    assert.equal(f.posts[0].data.data, f.blockHTML(BLOCK_A));
+    assert.deepEqual(f.calls.messages, [], "正常路径不该弹任何提示");
+});
+
+test("零宽范围是静默的空操作：既不报错也不落盘", async () => {
+    const f = createFixture();
+    f.plugin.onload();
+    f.clickToolbarItem();
+    // 白盒地把这一组的范围退化成零宽：覆盖不到任何字符的选区是一次合法的空操作，
+    // 不是「记下的坐标对不上」，因此不该打断用户，也不该产生任何改动
+    const [group] = f.plugin.groups;
+    group.end = group.start;
+    const beforeClick = f.blockHTML(BLOCK_A);
+
+    f.click(f.styleSwatchOf("underline", "wavy"));
+    await settle();
+
+    assert.deepEqual(f.calls.messages, [], "零宽范围不是错误");
+    assert.deepEqual(f.posts, [], "零宽范围不产生改动，也就没有落盘");
+    assert.equal(f.blockHTML(BLOCK_A), beforeClick);
 });
 
 test("撤销把块换回改动前的样子，并按文档里的真实状态刷新面板", async () => {

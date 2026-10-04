@@ -9,6 +9,7 @@
   "clearDecoration": "Clear decoration",
   "undo": "Undo",
   "saveFailed": "Unable to save the decoration",
+  "selectionChanged": "The selected content has changed, so nothing was applied. Select it again and retry.",
   "mixedSelection": "The decorations in the selection differ: changing anything applies this one configuration to every area in the selection.",
   "styleSolid": "Solid",
   "styleDashed": "Dashed",

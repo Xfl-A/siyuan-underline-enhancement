@@ -29,6 +29,7 @@ const {
     reclaimEditableElement,
     readDecorationStylesIn,
     readFirstTextColor,
+    offsetsWithinContent,
     getEventName,
 } = module;
 // 面板回填走的是 model 的 readPairFromStyle：装饰的 style 字符串在这里被翻译成面板那份配置。
@@ -1272,6 +1273,58 @@ test("restoreOffsets ignores an empty capture instead of throwing", () => {
     fresh.module.restoreOffsets(null);
     assert.equal(fresh.window.getSelection().rangeCount, 0);
     fresh.close();
+});
+
+// ------------------------------------------------ 记下的偏移是否还落在区域当前的内容之内
+
+/**
+ * 打开面板时记下的字符偏移必须仍能落在区域当前的内容之内，越界的一律要在这里被挡住。
+ *
+ * 夹具模拟的是「面板开着期间块的内容被换短」：偏移停留在 (0, 11)，区域内只剩 5 个字符。
+ * 这与思源重渲染块、块被删除、用户改写了块内容属于同一类后果 —— 记下的位置不再对应任何字符。
+ */
+const shrunkBlock = (text) => editor(`<p data-type="text" data-node-id="p1">${text}</p>`);
+
+test("offsetsWithinContent accepts offsets that still land inside the region", () => {
+    const cleanup = mount(shrunkBlock("hello"));
+    const paragraph = document.querySelector("p");
+    assert.equal(offsetsWithinContent(paragraph, {start: 0, end: 5}), true, "整段");
+    assert.equal(offsetsWithinContent(paragraph, {start: 1, end: 4}), true, "中段");
+    cleanup();
+});
+
+test("offsetsWithinContent rejects offsets that no longer address the current content", () => {
+    const cleanup = mount(shrunkBlock("abcde"));
+    const paragraph = document.querySelector("p");
+    // 记下的是 (0, 11)，区域内容只剩 5 个字符：locate 会把端点夹到末尾，包裹取出的是另一段内容
+    assert.equal(offsetsWithinContent(paragraph, {start: 0, end: 11}), false, "终点越过末尾");
+    assert.equal(offsetsWithinContent(paragraph, {start: 3, end: 6}), false, "起点在范围内、终点越界");
+    assert.equal(offsetsWithinContent(paragraph, {start: 8, end: 9}), false, "整体越界");
+    assert.equal(offsetsWithinContent(paragraph, {start: -2, end: 3}), false, "起点为负");
+    assert.equal(offsetsWithinContent(paragraph, {start: 4, end: 2}), false, "起止颠倒");
+    assert.equal(offsetsWithinContent(paragraph, {start: 0.5, end: 3}), false, "非整数偏移不是记下来的偏移");
+    cleanup();
+});
+
+test("offsetsWithinContent treats a zero-width range as a no-op instead of a divergence", () => {
+    const cleanup = mount(shrunkBlock("abcde"));
+    const paragraph = document.querySelector("p");
+    // 零宽范围覆盖不到任何字符，它是一次合法的空操作，不该打断用户
+    assert.equal(offsetsWithinContent(paragraph, {start: 0, end: 0}), true);
+    assert.equal(offsetsWithinContent(paragraph, {start: 3, end: 3}), true);
+    assert.equal(offsetsWithinContent(paragraph, {start: 5, end: 5}), true, "压在末尾的零宽范围仍在区域内");
+    // 但零宽范围同样不得越出区域：它覆盖不到字符，不代表可以放在区域之外
+    assert.equal(offsetsWithinContent(paragraph, {start: 6, end: 6}), false);
+    assert.equal(offsetsWithinContent(paragraph, {start: -1, end: -1}), false);
+    cleanup();
+});
+
+test("offsetsWithinContent rejects any offset once the region holds no text at all", () => {
+    const cleanup = mount(shrunkBlock(""));
+    const paragraph = document.querySelector("p");
+    assert.equal(offsetsWithinContent(paragraph, {start: 0, end: 0}), true, "空块上的零宽范围仍算合法");
+    assert.equal(offsetsWithinContent(paragraph, {start: 0, end: 1}), false);
+    cleanup();
 });
 
 // ---------------------------------------------------------------- getEventName

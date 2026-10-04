@@ -9,6 +9,7 @@
   "clearDecoration": "清除装饰",
   "undo": "撤销",
   "saveFailed": "装饰保存失败",
+  "selectionChanged": "选中的内容已经变了，未做改动；请重新选中后再试",
   "mixedSelection": "选区内的装饰并不一致：改动任一项都会把选区里的所有区域统一成这一份配置。",
   "styleSolid": "实线",
   "styleDashed": "虚线",

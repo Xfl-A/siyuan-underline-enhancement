@@ -551,7 +551,32 @@ export const readFirstTextColor = (root: HTMLElement): string => {
     return view.getComputedStyle(parent).color ?? "";
 };
 
-/** 记下选区在各个可编辑区域里的字符偏移；DOM 改动后原 Range 会失效，靠它重建 */
+/**
+ * 这对字符偏移是否还落在区域当前的内容之内。
+ *
+ * 偏移只是位置，而位置会失效：面板开着的那段时间里块可能被思源重渲染、被用户改写或删掉，
+ * 打开时记下的 [start, end) 一旦整体越出区域，它标的就再也不是任何字符了。
+ * 越界的偏移绝不能拿去包裹：locate 会把越界的端点悄悄夹到区域末尾（绝不把范围算到区域之外），
+ * extractContents 于是取出另一段内容，而那一段会被原样写进磁盘。
+ * 包裹之前先过这一关，是把「宁可不改」与「改错用户的字」之间的那条界线划出来。
+ *
+ * 零宽范围不按失效处理：它覆盖不到任何字符，是一次合法的空操作，不该打断用户。
+ * 但零宽范围同样不得越出区域 —— 覆盖不到字符不代表可以放在区域之外。
+ *
+ * @param editableElement 偏移所属的可编辑区域
+ * @param offsets 区域内的一对字符偏移
+ */
+export const offsetsWithinContent = (editableElement: HTMLElement, offsets: IOffsetRange): boolean => {
+    const length = editableElement?.textContent?.length ?? 0;
+    return Number.isInteger(offsets.start) && Number.isInteger(offsets.end) &&
+        offsets.start >= 0 &&
+        offsets.end >= offsets.start &&
+        offsets.end <= length;
+};
+
+/**
+ * 记下选区在各个可编辑区域里的字符偏移；DOM 改动后原 Range 会失效，靠它重建
+ */
 export const captureOffsets = (range: Range): Array<[HTMLElement, number, number]> => {
     return collectEditableGroups(range).map((group) => {
         const captured: [HTMLElement, number, number] = [group.editableElement, group.start, group.end];

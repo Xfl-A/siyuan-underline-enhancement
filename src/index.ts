@@ -18,6 +18,7 @@ import {
     applySpansIn,
     captureOffsets,
     collectEditableGroups,
+    offsetsWithinContent,
     readDecorationStylesIn,
     readFirstTextColor,
     reclaimEditableElement,
@@ -210,7 +211,12 @@ export default class UnderlineEnhancement extends Plugin {
     private applyPair(pair: IDecorationPair): void {
         // 思源随时会重渲染块，面板开着期间记下的引用随时可能脱管：每次应用都先重新认领，
         // 读块 HTML、包裹装饰与重建选区才都落在文档里那个节点上
-        this.claimBlocks();
+        if (!this.claimBlocks() || !this.offsetsWithinContent()) {
+            // 记下的那对偏移已经不再指向文档里的内容：这一次什么都不做，也不落盘，
+            // 宁可请用户重选一次，也不能按着一组过期坐标改他的文档
+            showMessage(this.i18n.selectionChanged as string);
+            return;
+        }
         const specs = composePair(sanitizePair(pair));
         const changed: IBlockChange[] = [];
         for (const group of this.groups) {
@@ -248,6 +254,7 @@ export default class UnderlineEnhancement extends Plugin {
             if (!await undoLastChange()) {
                 return;
             }
+            // 撤销已经把改动写回内核，面板接下来只做回读：认不回来也没有东西要再写一次
             this.claimBlocks();
             const current = this.readCurrentPair();
             this.syncPanel(current.pair, current.mixed);
@@ -264,25 +271,49 @@ export default class UnderlineEnhancement extends Plugin {
      * 屏幕上什么也不出现，磁盘上多一次内容没变的 updateBlock，面板显示的选区也不存在，
      * 下一次撤销还会因 afterHTML 校验不过而被静默丢弃。可编辑区域本身是新块里的哪一个，
      * 由 dom.ts 按位置判定。
+     *
+     * 提前返回的判据只是「块还连着文档」：面板的实时预览会以毫秒级连续触发，
+     * 每一次都全文扫描 data-node-id 在长文档上是白付的代价。坐标是否还对得上由调用方另问一遍。
+     *
+     * @returns 是否每一组都还认得到活着的块；块已被删除或用户已切走文档时为 false
      */
-    private claimBlocks(): void {
+    private claimBlocks(): boolean {
         for (let i = 0; i < this.groups.length; i++) {
             const group = this.groups[i];
-            // 还连在文档里就不用重新找：面板的实时预览会在毫秒级连续触发，
-            // 每一次都全文扫描 data-node-id 在长文档上是白付的代价
+            // 还连在文档里就不用重新找
             if (group.blockElement.isConnected) {
                 continue;
             }
             const blockId = group.blockElement.getAttribute(NODE_ID_ATTRIBUTE);
             const blockElement = blockId === null ? null : findBlockElement(blockId);
-            // 块已经不在文档里（被删除，或用户已切走），这一组就此作废
             if (blockElement === null) {
-                continue;
+                // 没有块 id 的区域无从查找，但它仍连在文档上：照旧装饰，只是不落盘
+                if (group.blockElement.isConnected) {
+                    continue;
+                }
+                // 块已经不在文档里（被删除，或用户已切走），这一组就此作废：
+                // 拿着脱管节点继续改并落盘，就是把一份已经不存在的副本写回内核
+                return false;
             }
             group.editableElement = reclaimEditableElement(group.editableElement, blockElement);
             group.blockElement = blockElement;
             this.offsets[i][0] = group.editableElement;
         }
+        return true;
+    }
+
+    /**
+     * 每一组记下的字符偏移是否还落在区域当前的内容之内。
+     *
+     * 这是包裹装饰之前的最后一道闸，也是记下的坐标对不上时唯一不许继续往下走的那个门。
+     * 面板开着期间块可能被重渲染、被改写或被删掉，此时打开时记下的 [start, end) 可能整体越界；
+     * locate 对越界的端点一律夹到区域末尾，包裹出来的因此是另一段内容，它会被原样写进磁盘。
+     *
+     * 一次操作要覆盖全部区域，所以任一组对不上就整次放弃：半套改动既不是用户要的，
+     * 也会让撤销栈里留下一条对不上的记录。
+     */
+    private offsetsWithinContent(): boolean {
+        return this.groups.every((group) => offsetsWithinContent(group.editableElement, group));
     }
 
     /**
