@@ -268,6 +268,11 @@ export default class UnderlineEnhancement extends Plugin {
     private claimBlocks(): void {
         for (let i = 0; i < this.groups.length; i++) {
             const group = this.groups[i];
+            // 还连在文档里就不用重新找：面板的实时预览会在毫秒级连续触发，
+            // 每一次都全文扫描 data-node-id 在长文档上是白付的代价
+            if (group.blockElement.isConnected) {
+                continue;
+            }
             const blockId = group.blockElement.getAttribute(NODE_ID_ATTRIBUTE);
             const blockElement = blockId === null ? null : findBlockElement(blockId);
             // 块已经不在文档里（被删除，或用户已切走），这一组就此作废
