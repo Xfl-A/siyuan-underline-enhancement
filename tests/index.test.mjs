@@ -290,6 +290,8 @@ const createFixture = (options = {}) => {
      *
      * ToolbarItem 只 preventDefault，不 stopPropagation，事件照样冒泡到 document；
      * 面板的「点击面板外关闭」就挂在 document 上，同一次点击不能把刚开的面板关掉。
+     * 派发的是完整的按下-抬起-点击序列：真实指针交互就是这样一串事件。
+     * 返回三个事件对象，测试要能逐个断言 defaultPrevented。
      */
     const clickToolbarButton = (protyle = protyleOf(singleRange())) => {
         const button = document.createElement("button");
@@ -298,8 +300,12 @@ const createFixture = (options = {}) => {
             event.preventDefault();
             toolbarItem().click(protyle);
         });
-        button.dispatchEvent(new window.MouseEvent("click", {bubbles: true}));
-        return button;
+        const mousedown = new window.MouseEvent("mousedown", {bubbles: true, cancelable: true});
+        button.dispatchEvent(mousedown);
+        button.dispatchEvent(new window.MouseEvent("mouseup", {bubbles: true, cancelable: true}));
+        const click = new window.MouseEvent("click", {bubbles: true, cancelable: true});
+        button.dispatchEvent(click);
+        return {button, mousedown, click};
     };
 
     const panelElement = () => document.querySelector("[data-sue-panel]");
@@ -311,6 +317,19 @@ const createFixture = (options = {}) => {
     const actionButton = (action) => panelElement().querySelector(`[data-sue-action="${action}"]`);
     const mixedHint = () => panelElement().querySelector("[data-sue-mixed]");
     const pressed = (element) => element.getAttribute("aria-pressed") === "true";
+
+    /** 冒泡地派发一个可取消事件，返回事件对象供断言 defaultPrevented */
+    const mouse = (element, type = "mousedown") => {
+        const event = new window.MouseEvent(type, {bubbles: true, cancelable: true});
+        element.dispatchEvent(event);
+        return event;
+    };
+
+    /** 完整指针序列：按下再点击 */
+    const press = (element) => {
+        mouse(element, "mousedown");
+        return mouse(element, "click");
+    };
 
     const click = (element) => element.dispatchEvent(new window.MouseEvent("click", {bubbles: true}));
     const toggle = (element, checked) => {
@@ -361,6 +380,8 @@ const createFixture = (options = {}) => {
         mixedHint,
         pressed,
         click,
+        mouse,
+        press,
         toggle,
         rerender,
         requestedI18NKeys: () => [...new Set(requestedI18NKeys)],
@@ -589,6 +610,66 @@ test("从浮动工具栏的按钮点击打开面板时，同一次点击冒泡�
     // 面板确实能用来改设置，不是一个开了就被回收的空壳
     f.click(f.styleSwatchOf("underline", "wavy"));
     assert.match(f.blockHTML(BLOCK_A), DECORATED_UNDERLINE);
+});
+
+test("面板拦 mousedown 的范围只有面板自己：工具栏按钮的按下不受影响，面板也不被关掉", () => {
+    // 面板挂在 body 上并在自身范围内吃 mousedown 的默认行为；浮动工具栏是思源的地盘，不能碰
+    const f = createFixture();
+    f.plugin.onload();
+    const {mousedown, click: openingClick} = f.clickToolbarButton();
+    assert.equal(mousedown.defaultPrevented, false, "工具栏按钮上的按下不该被面板拦下");
+    assert.equal(openingClick.defaultPrevented, true, "思源 ToolbarItem 自己会 preventDefault");
+    assert.ok(f.panelElement(), "面板仍然留着：打开的那一次点击不能把它关掉");
+
+    // 面板开着之后再点同一个工具栏按钮：仍然只由面板自己的子树处理按下
+    const again = f.mouse(f.clickToolbarButton().button, "mousedown");
+    assert.equal(again.defaultPrevented, false);
+    assert.ok(f.panelElement());
+});
+
+test("面板控件上的 mousedown 被拦下，控件依然把改动落到文档上", () => {
+    // 编辑器一失焦思源就清掉选区，面板记下的坐标随即失去意义，因此按下必须被拦下。
+    // jsdom 不会因派发事件移动焦点，端到端的选区存活要在真实思源里验；这里断言契约与控件可用。
+    const f = createFixture();
+    f.plugin.onload();
+    f.clickToolbarItem();
+    // 思源的可编辑区是一个 contenteditable；jsdom 只把带这个属性的元素当作可聚焦
+    const editor = f.document.getElementById("editor");
+    editor.setAttribute("contenteditable", "true");
+    editor.focus();
+    assert.equal(f.document.activeElement, editor, "夹具前提：焦点先落在编辑器上");
+
+    const targets = [
+        ["面板根", f.panelElement()],
+        ["线型色块", f.styleSwatchOf("underline", "wavy")],
+        ["颜色色块", f.colorSwatchOf("underline", "#0090ff")],
+        ["跟随文字色色块", f.followSwatchOf("underline")],
+        ["方向开关", f.switchOf("underline")],
+        ["清除装饰", f.actionButton("clear")],
+        ["撤销", f.actionButton("undo")],
+    ];
+    for (const [name, element] of targets) {
+        assert.equal(f.mouse(element).defaultPrevented, true, `${name} 上的 mousedown 必须被拦下`);
+    }
+
+    // 拦下按下之后，控件仍然响应：改动照样落到块上
+    f.press(f.styleSwatchOf("underline", "wavy"));
+    assert.match(f.blockHTML(BLOCK_A), DECORATED_UNDERLINE);
+    // jsdom 不会因为派发事件移动焦点，因此这一条只能证明插件自己没把焦点带走；
+    // 「焦点留在编辑器 → 思源不清选区」必须在真实思源里验
+    assert.equal(f.document.activeElement, editor, "点面板不应把焦点带离编辑器");
+});
+
+test("面板外的按下与点击仍然关闭面板", () => {
+    const f = createFixture();
+    f.plugin.onload();
+    f.clickToolbarItem();
+    const outside = f.document.getElementById("editor");
+    // 面板只在自己的范围内拦按下；面板外的按下不该被拦，也不该关闭面板（它只监听点击）
+    assert.equal(f.mouse(outside).defaultPrevented, false);
+    assert.ok(f.panelElement(), "面板外的按下不关闭面板");
+    f.mouse(outside, "click");
+    assert.equal(f.panelElement(), null, "面板外的点击关闭面板");
 });
 
 test("对照组：表格单元格里连续改两次设置，两次都落到文档上", async () => {

@@ -159,6 +159,18 @@ const createFixture = (options = {}) => {
         return event;
     };
 
+    /**
+     * 完整的指针序列：先按下再点击。
+     * mousedown 必须带 cancelable，否则 preventDefault 不会置位 defaultPrevented，断言就成了自证；
+     * click 必须是真的 MouseEvent，浏览器才会在它上面跑复选框的激活行为（jsdom 与浏览器同此约定）。
+     */
+    const press = (element) => {
+        const down = fire(element, "mousedown", {cancelable: true});
+        const click = new window.MouseEvent("click", {bubbles: true, cancelable: true});
+        element.dispatchEvent(click);
+        return {down, click};
+    };
+
     return {
         window,
         document,
@@ -184,6 +196,7 @@ const createFixture = (options = {}) => {
         lastChange,
         countOf,
         fire,
+        press,
         close: () => window.close(),
     };
 };
@@ -481,6 +494,47 @@ test("点击跟随文字色色块与自定义取色器都会更新该方向的�
     close();
 });
 
+test("颜色是跟随文字色时跟随色块读作选中，挑了具体颜色就不再是", () => {
+    const FOLLOW_UNDERLINE = {underline: {enabled: true, style: "solid", color: ""}, overline: DEFAULT_PAIR.overline};
+    const follow = createFixture({initialPair: FOLLOW_UNDERLINE});
+    assert.equal(
+        follow.followSwatchOf("underline").getAttribute("aria-pressed"),
+        "true",
+        "颜色为空串就是跟随文字色",
+    );
+    follow.close();
+
+    // 文档里的 span 带着显式的 currentColor：读回来同样要选中跟随色块，而不是落到某个默认色上
+    const restored = createFixture({
+        initialPair: toHost(
+            follow.model.readPairFromStyle(
+                "text-decoration-line: underline; text-decoration-style: solid; text-decoration-color: currentColor",
+                null,
+            ),
+        ),
+    });
+    assert.equal(
+        restored.followSwatchOf("underline").getAttribute("aria-pressed"),
+        "true",
+        "读回的 currentColor 声明要显示为「跟随文字颜色」",
+    );
+    restored.close();
+
+    const explicit = createFixture({
+        initialPair: {underline: {enabled: true, style: "solid", color: "#46a758"}, overline: DEFAULT_PAIR.overline},
+    });
+    const followSwatch = explicit.followSwatchOf("underline");
+    assert.equal(followSwatch.getAttribute("aria-pressed"), "false", "选了具体颜色就不再是跟随");
+    // 挑一个具体颜色，再点回跟随：两个方向的选中态都要跟着走
+    followSwatch.click();
+    assert.equal(explicit.lastChange().underline.color, "");
+    assert.equal(followSwatch.getAttribute("aria-pressed"), "true", "点跟随色块必须能清回跟随");
+    explicit.colorSwatchesOf("underline")[3].click();
+    assert.equal(explicit.lastChange().underline.color, "#46a758");
+    assert.equal(followSwatch.getAttribute("aria-pressed"), "false");
+    explicit.close();
+});
+
 test("块上已有的自定义色既回填取色器、也补一块临时色块，非 #rrggbb 的不写进取色器", () => {
     const {section, customInputOf, colorSwatchesOf, customSwatchOf, customSwatchesOf, close} = createFixture({
         initialPair: {
@@ -690,6 +744,124 @@ test("setPair 与构造一样先过白名单", () => {
     assert.equal(pair.underline.enabled, true, "布尔以外的 enabled 退回默认值");
     assert.equal(pair.overline.style, "wavy");
     assert.equal(pair.overline.color, "#ABC");
+    close();
+});
+
+// ------------------------------------------------------------------ 焦点
+
+// 面板上的控件全是 button 与 input：按下时浏览器默认把焦点从 contenteditable 带走，
+// 而思源一失焦就清掉选区，面板记下的坐标随即失去意义，用户看到的就是「点一下取消选中」。
+// 因此面板必须在自己的范围内吃掉 mousedown 的默认行为。jsdom 不会因为派发事件而移动焦点，
+// 这里断言的是契约本身（defaultPrevented）以及控件仍然响应，端到端要留给真实思源验证。
+
+test("面板根与每一类控件上的 mousedown 都被拦下，焦点因此留在编辑器", () => {
+    const {panel, switchOf, styleSwatchOf, colorSwatchesOf, followSwatchOf, customInputOf, actionButton, fire, close} =
+        createFixture({undoEnabled: true, initialPair: DEFAULT_PAIR});
+    const targets = [
+        ["面板根", panel],
+        ["面板内的非控件", panel.querySelector("[data-sue-title]")],
+        ["线型色块", styleSwatchOf("underline", "wavy")],
+        ["颜色色块", colorSwatchesOf("underline")[5]],
+        ["跟随文字色色块", followSwatchOf("underline")],
+        ["方向开关", switchOf("underline")],
+        ["取色器", customInputOf("underline")],
+        ["清除装饰", actionButton("clear")],
+        ["撤销", actionButton("undo")],
+    ];
+    for (const [name, target] of targets) {
+        const event = fire(target, "mousedown", {cancelable: true});
+        assert.equal(event.defaultPrevented, true, `${name} 上的 mousedown 必须被拦下`);
+    }
+    close();
+});
+
+test("拦下 mousedown 之后，各类控件仍然响应", () => {
+    // preventDefault 只吃掉 mousedown 的默认行为（焦点转移与起拖），click 照常派发
+    const {
+        switchOf,
+        styleSwatchOf,
+        colorSwatchesOf,
+        followSwatchOf,
+        actionButton,
+        press,
+        changes,
+        lastChange,
+        countOf,
+        close,
+    } = createFixture({undoEnabled: true, initialPair: DEFAULT_PAIR});
+
+    press(styleSwatchOf("underline", "wavy"));
+    assert.equal(changes().length, 1);
+    assert.equal(lastChange().underline.style, "wavy");
+
+    press(colorSwatchesOf("underline")[5]);
+    assert.equal(changes().length, 2);
+    assert.equal(lastChange().underline.color, "#0090ff");
+
+    press(followSwatchOf("underline"));
+    assert.equal(changes().length, 3);
+    assert.equal(lastChange().underline.color, "");
+
+    // 开关的勾选由浏览器在 click 的激活行为里翻转，因此照样可用
+    press(switchOf("overline"));
+    assert.equal(changes().length, 4);
+    assert.equal(lastChange().overline.enabled, true);
+
+    press(actionButton("clear"));
+    press(actionButton("undo"));
+    assert.equal(countOf("clear"), 1);
+    assert.equal(countOf("undo"), 1);
+    close();
+});
+
+test("移动端同样只拦 mousedown，不碰 touchstart", () => {
+    // preventDefault 掉 touchstart 会连带取消浏览器补发的 click 与触摸的默认滚动，
+    // 面板会既点不动也滚不动；触摸设备上按钮本来也不会抢焦点，mousedown 一道足够
+    const {styleSwatchOf, fire, changes, lastChange, close} = createFixture({frontend: "mobile"});
+    const mousedown = fire(styleSwatchOf("underline", "wavy"), "mousedown", {cancelable: true});
+    assert.equal(mousedown.defaultPrevented, true, "移动端也要拦住会把焦点带走的按下");
+
+    const touchstart = fire(styleSwatchOf("underline", "wavy"), "touchstart", {cancelable: true});
+    assert.equal(touchstart.defaultPrevented, false, "touchstart 不能拦：会连点击与滚动一起取消");
+
+    fire(styleSwatchOf("underline", "wavy"), "touchend");
+    assert.equal(changes().length, 1);
+    assert.equal(lastChange().underline.style, "wavy");
+    close();
+});
+
+test("拦下面板内的 mousedown 之后，面板内外的点击行为都不变", () => {
+    const {panel, document, fire, countOf, close} = createFixture();
+    // 面板内：mousedown 被拦下，click 仍冒泡到 document，靠 contains 排除在「面板外」之外
+    const inside = fire(panel.querySelector("[data-sue-action='clear']"), "mousedown", {cancelable: true});
+    assert.equal(inside.defaultPrevented, true);
+    fire(panel.querySelector("[data-sue-action='clear']"), "click");
+    assert.equal(countOf("close"), 0, "面板内部的点击不能被当成「面板外」");
+
+    // 面板与锚点之外：面板管不着，按下不拦，click 照样关闭面板
+    const outside = document.createElement("div");
+    document.body.appendChild(outside);
+    const outsideDown = fire(outside, "mousedown", {cancelable: true});
+    assert.equal(outsideDown.defaultPrevented, false, "面板外的按下不受面板影响");
+    assert.equal(countOf("close"), 0, "面板只监听自己的事件名，面板外的 mousedown 不关闭面板");
+    fire(outside, "click");
+    assert.equal(countOf("close"), 1, "面板外的点击仍然关闭面板");
+    close();
+});
+
+test("destroy 之后不再拦 mousedown", () => {
+    const {document, controller, styleSwatchesOf, fire, countOf, changes, close} = createFixture({undoEnabled: true});
+    const before = fire(styleSwatchesOf("underline")[3], "mousedown", {cancelable: true});
+    assert.equal(before.defaultPrevented, true, "夹具前提：销毁前监听是活的");
+
+    const detached = styleSwatchesOf("underline")[3];
+    controller.destroy();
+    // 面板元素已从 DOM 摘掉，但监听若还留在它身上，脱管控件上的按下仍会被拦
+    const after = fire(detached, "mousedown", {cancelable: true});
+    assert.equal(after.defaultPrevented, false, "destroy 之后不该再有 mousedown 处理");
+    fire(document.body, "click");
+    assert.equal(countOf("close"), 0, "销毁后面板不该再响应任何关闭入口");
+    assert.equal(changes().length, 0);
     close();
 });
 

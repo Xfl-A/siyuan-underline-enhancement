@@ -156,6 +156,15 @@ const MOBILE_MAX_HEIGHT = "60vh";
 const MOBILE_VALUE = "true";
 /** 移动端的事件名；桌面端是 click */
 const TOUCH_EVENT = "touchend";
+/**
+ * 拦下默认行为的事件名。
+ *
+ * 与事件名（桌面 click、移动 touchend）刻意不同：click 拦了会把控件自己也一起拦掉。
+ * 只拦 mousedown：它的默认行为无非是把焦点从 contenteditable 带走、起一次拖、把选区起点落在这里，
+ * 随后的 click 照常派发，控件仍然响应。
+ * 不用 touchstart：它的默认行为还管着滚动与合成 click，拦掉的话面板既滚不动也点不动。
+ */
+const PRESS_EVENT = "mousedown";
 /** 关闭面板的按键 */
 const ESCAPE_KEY = "Escape";
 /** 跟随文字色色块上的字母 */
@@ -250,7 +259,7 @@ const createColorSwatch = (doc: Document, color: string): HTMLButtonElement => {
 };
 
 /**
- * 「跟随文字色」色块：字母 A 表示装饰省略 text-decoration-color 后真正会取到的那个颜色，背景透明。
+ * 「跟随文字色」色块：字母 A 表示装饰跟随文字颜色时真正会取到的那个颜色，背景透明。
  *
  * A 用选中文字的计算色上色——不显出那个颜色，这个色块就等于没有预览，装饰落到文字上的效果也无从预期。
  * 这个值过不了计算色白名单就一个属性都不写：继承来的颜色仍然读得出来，
@@ -653,6 +662,22 @@ export const createPanel = (options: IPanelOptions): IPanelController => {
         }
         options.onClose();
     };
+
+    /**
+     * 吃掉面板内按下的默认行为，让编辑器的焦点留在原地。
+     *
+     * 面板上的控件全是 button 与 input，按下时浏览器默认把焦点交给被按的那个元素；
+     * 编辑器一失焦思源就清掉选区，面板记下的坐标随即失去意义，用户看到的是「点一下取消选中」。
+     *
+     * 挂在面板根上而不是逐个控件：色块、开关、取色器、两个动作按钮以及渲染时才插进来的
+     * 临时色块都在这棵子树里，一处监听就够，后加的控件也自动被罩住。
+     * 只 preventDefault，不 stopPropagation：click 照旧冒泡到 document，
+     * 「点击面板外关闭」与 Escape 两条出口的判定都不受影响。
+     */
+    const handleMouseDown = (event: Event): void => {
+        event.preventDefault();
+    };
+    panel.addEventListener(PRESS_EVENT, handleMouseDown);
     ownerDocument.addEventListener(eventName, handleOutsideEvent);
     ownerDocument.addEventListener("keydown", handleKeydown);
 
@@ -680,6 +705,8 @@ export const createPanel = (options: IPanelOptions): IPanelController => {
             // 挂在 document 上的两个监听必须显式摘掉：它们不在面板子树里，不会随子树一起消失
             ownerDocument.removeEventListener(eventName, handleOutsideEvent);
             ownerDocument.removeEventListener("keydown", handleKeydown);
+            // 这一个同样显式摘掉：面板虽然已经从 DOM 移除，脱管节点上的按下不该再被它拦住
+            panel.removeEventListener(PRESS_EVENT, handleMouseDown);
             panel.remove();
         },
     };
