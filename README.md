@@ -47,10 +47,7 @@ into the panel and the caret never leaves the editor.
 <!-- Screenshot placeholder: capture the panel opened from the floating toolbar and save the image as
      docs/images/screenshot.png, then uncomment the line below. -->
 
-<!-- ![The Underline Enhancement panel next to the editor's floating toolbar](docs/images/screenshot.png) -->
-
-_Screenshot placeholder: the Underline Enhancement panel, opened from the editor's floating toolbar, with the
-underline set to a wavy red line._
+![The Underline Enhancement panel next to the editor's floating toolbar](docs/images/screenshot.png)
 
 ## Installation
 
