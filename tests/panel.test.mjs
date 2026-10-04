@@ -513,6 +513,35 @@ test("选中项带 aria-pressed 与自定义 class，未选中项不带", () => 
     close();
 });
 
+test("线型色块的选中与未选中在 DOM 上分得开，且两档都不带禁用态", () => {
+    // 「当前线型更深、其余更浅」由样式表按这两套标记画出来（见样式表用例）。
+    // 面板这边只负责把两种状态真的标出来，并且不给选中那一块任何禁用的暗示：
+    // 没有 hover 反应、没有禁止指针的控件，用户最初报的就是这个症状
+    const {styleSwatchOf, styleSwatchesOf, close} = createFixture({
+        initialDecoration: {...DEFAULT_DECORATION, style: "dotted"},
+    });
+    const dotted = styleSwatchOf("underline", "dotted");
+    const solid = styleSwatchOf("underline", "solid");
+
+    assert.equal(dotted.getAttribute("aria-pressed"), "true");
+    assert.ok(dotted.classList.contains("sue-swatch--selected"), "选中那一块要带上选中态 class");
+    assert.equal(solid.getAttribute("aria-pressed"), "false");
+    assert.ok(!solid.classList.contains("sue-swatch--selected"), "未选中那一块不得带选中态 class");
+    // 整排只有一个选中项：深浅之外还得先说得出「就这一个」
+    assert.deepEqual(
+        styleSwatchesOf("underline")
+            .filter((swatch) => swatch.getAttribute("aria-pressed") === "true")
+            .map((swatch) => swatch.getAttribute("data-sue-style")),
+        ["dotted"],
+    );
+    for (const swatch of [dotted, solid]) {
+        assert.equal(swatch.getAttribute("aria-disabled"), null, `线型色块不该有禁用态：${swatch.outerHTML}`);
+        // 预览线仍由元素自身的 text-decoration 画出，线色取 currentColor，因此深浅落在 color 上
+        assert.equal(swatch.style.textDecorationColor, "currentColor");
+    }
+    close();
+});
+
 test("默认配置打开面板时，下划线的直线色块就是选中态", () => {
     // 用户报过「下划线开关默认开启，但没有出现下划线」。
     // 面板默认就是「跟随文字颜色 + 直线」，因此首屏必须把 solid 摆成选中：
@@ -1779,6 +1808,60 @@ test("面板根的尺寸约定与定位一致：最大宽度让出视口边距�
     assert.match(panelSource, /const MAX_HEIGHT = "\d+vh"/, "panel.ts 里必须给出桌面端限高常量");
     assert.match(panelSource, /panel\.style\.maxHeight = mobile \? MOBILE_MAX_HEIGHT : MAX_HEIGHT;/);
     assert.match(panelSource, /panel\.style\.overflowY = "auto"/, "面板仍须是纵向滚动容器");
+});
+
+// 线型色块的预览线是元素自己的文字画出来的（panel.ts 写的是 text-decoration + currentColor），
+// 因此「当前线型颜色变深、其余变浅」只能落在 color 上，而深浅要跟主题走 ——
+// 写死一个颜色的话深色主题下两档就分不出来了。jsdom 不应用样式表，因此核对样式表源码。
+test("线型色块按选中与否给出深浅两档线色，两档都跟随主题变量", () => {
+    const scss = readFileSync(new URL("../src/index.scss", import.meta.url), "utf8");
+    const panelSource = readFileSync(new URL("../src/panel.ts", import.meta.url), "utf8");
+    // 属性名与 class 名都以 panel.ts 实际写出的那个为准，对不上就说明选择器已经配不上元素了
+    assert.match(panelSource, /const STYLE_ATTRIBUTE = "([^"]+)"/, "panel.ts 里必须有线型色块的标记常量");
+    const styleAttribute = /const STYLE_ATTRIBUTE = "([^"]+)"/.exec(panelSource)[1];
+    const selectedClass = /const SELECTED_CLASS = "([^"]+)"/.exec(panelSource)[1];
+    assert.ok(selectedClass, "panel.ts 里必须有选中态 class 常量");
+
+    const plain = new RegExp(`\\[data-sue-panel\\]\\s*\\[${styleAttribute}\\]\\s*\\{([^}]*)\\}`).exec(scss);
+    assert.ok(plain, `index.scss 里必须有 [${styleAttribute}] 的未选中态规则`);
+    const selected = new RegExp(`\\[data-sue-panel\\]\\s*\\[${styleAttribute}\\]\\.${selectedClass}\\s*\\{([^}]*)\\}`)
+        .exec(scss);
+    assert.ok(selected, `index.scss 里必须有 [${styleAttribute}].${selectedClass} 的选中态规则`);
+
+    const colorOf = (body) => {
+        const matched = /(?:^|[;{\s])color:\s*([^;]*);/.exec(body);
+        assert.ok(matched, `规则里没有 color 声明：${body}`);
+        return matched[1].trim();
+    };
+    // 未选中那一档要浅、选中那一档要深：两档必须是不同的值，否则深浅这一层等于没做
+    assert.notEqual(colorOf(plain[1]), colorOf(selected[1]), "选中与未选中必须给出不同的线色");
+    // 两档都取自思源的主题变量，深浅主题各自跟随；每档都带一个不透明兜底色
+    for (const [name, body] of [["未选中", plain[1]], ["选中", selected[1]]]) {
+        assert.match(
+            body,
+            /color:\s*[^;]*var\(--b3-[^;]*#[0-9a-fA-F]{3,8}[^;]*;/,
+            `${name}那一档的线色必须跟主题走并留兜底值`,
+        );
+    }
+    // 选中那一块仍然可点：它只是「已经是当前线型」，不是被禁用了。
+    // 少了 hover 反馈或按下不响应，用户最初报的就是这类症状
+    for (const [name, body] of [["未选中", plain[1]], ["选中", selected[1]]]) {
+        assert.ok(!/pointer-events/.test(body), `${name}那一档不得关掉指针事件：${body}`);
+        assert.ok(!/not-allowed/.test(body), `${name}那一档不得用禁止指针表示状态：${body}`);
+        assert.ok(!/cursor\s*:\s*none/.test(body), `${name}那一档不得藏起鼠标指针：${body}`);
+    }
+    // 深浅之外，选中态外面那圈指示色仍然在：深浅只说明「哪一块是当前线型」，外圈给出的是同一件事的第二条线索
+    assert.match(
+        scss,
+        new RegExp(`\\.${selectedClass}\\s*\\{[^}]*box-shadow:[^;]*var\\(--b3-primary-color`),
+        "选中态的外圈指示色不能丢",
+    );
+
+    // 颜色色块与跟随文字色色块不在这次改动的范围内：它们的选中态外观仍只有那一圈指示色
+    for (const attribute of ["data-sue-color", "data-sue-follow-color"]) {
+        const rule = new RegExp(`\\[data-sue-panel\\]\\s*\\[${attribute}\\]\\.${selectedClass}\\s*\\{`).exec(scss);
+        assert.equal(rule, null, `颜色类色块不该另给深浅线色：${rule?.[0] ?? ""}`);
+    }
 });
 
 // 撤销键的禁用态：div 没有 disabled 属性，语义由 aria-disabled 承担、外观由样式表给出。

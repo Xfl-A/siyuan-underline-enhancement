@@ -125,6 +125,18 @@
   border: 1px solid var(--b3-border-color, #e0e0e0);
 }
 
+/* 线型色块：示例线由元素自身的 text-decoration 画出，线色取自 color（panel.ts 写的是 currentColor），
+   因此「当前线型更深、其余更浅」只需改 color。选中那一块仍然可点、仍然有悬浮反馈，
+   深浅只是「它已经是当前线型」的说明，不是禁用。色值取自思源的主题变量，深浅主题各自跟随。
+   选中态外面那圈指示色仍由 .sue-swatch--selected 给出，两条线索合起来才读得出当前线型。 */
+[data-sue-panel] [data-sue-style] {
+  color: var(--b3-theme-color-lighter, #999);
+}
+
+[data-sue-panel] [data-sue-style].sue-swatch--selected {
+  color: var(--b3-theme-color, #333);
+}
+
 /* 选中态：向外扩一圈，不盖住色块自身的颜色 */
 [data-sue-panel] .sue-swatch--selected {
   box-shadow: 0 0 0 2px var(--b3-primary-color, var(--b3-theme-color, currentColor));
