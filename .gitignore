@@ -17,3 +17,5 @@ kernel.js
 # 本地开发工作区
 /.worktrees
 /.superpowers
+# 一次性诊断探针，不属于插件
+probe-*.mjs
