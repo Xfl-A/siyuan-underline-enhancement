@@ -133,7 +133,7 @@ const createFixture = (options = {}) => {
     const switchOf = (direction) => section(direction).querySelector("[data-sue-switch]");
     const styleSwatchesOf = (direction) => Array.from(section(direction).querySelectorAll("[data-sue-style]"));
     const styleSwatchOf = (direction, style) => section(direction).querySelector(`[data-sue-style="${style}"]`);
-    // 预设色块：自定义色的临时色块另带标记，不算预设，因此预设恒为 10 块
+    // 预设色块：自定义色的临时色块另带标记，不算预设，因此预设恒为 11 块
     const colorSwatchesOf = (direction) =>
         Array.from(section(direction).querySelectorAll("[data-sue-color]:not([data-sue-custom-swatch])"));
     const customSwatchesOf = (direction) => Array.from(section(direction).querySelectorAll("[data-sue-custom-swatch]"));
@@ -210,7 +210,7 @@ test("面板挂到 body 上并带 data-sue-panel 标记", () => {
     close();
 });
 
-test("面板含两个方向区块，各带开关、5 个线型色块、跟随文字色色块、10 个预设色块与取色器", () => {
+test("面板含两个方向区块，各带开关、5 个线型色块、跟随文字色色块、11 个预设色块与取色器", () => {
     const {panel, model, switchOf, styleSwatchesOf, colorSwatchesOf, followSwatchOf, customInputOf, close} =
         createFixture();
     assert.deepEqual(
@@ -230,7 +230,7 @@ test("面板含两个方向区块，各带开关、5 个线型色块、跟随文
             "线型色块的展示顺序必须与 LINE_STYLES 一致",
         );
         assert.equal(styleSwatchesOf(direction).length, 5);
-        assert.equal(colorSwatchesOf(direction).length, 10);
+        assert.equal(colorSwatchesOf(direction).length, 11);
         assert.deepEqual(
             colorSwatchesOf(direction).map((swatch) => swatch.getAttribute("data-sue-color")),
             toHost(model.PRESET_COLORS),
@@ -241,6 +241,24 @@ test("面板含两个方向区块，各带开关、5 个线型色块、跟随文
         assert.equal(follow.style.backgroundColor, "transparent", "跟随文字色色块背景透明");
         assert.equal(follow.style.color, "", "跟随文字色色块的文字色继承面板正文色");
         assert.equal(customInputOf(direction).type, "color", "每个方向都要有自定义取色器");
+    }
+    close();
+});
+
+test("每个方向的颜色行都给出纯黑色块", () => {
+    // 纯黑是「跟随文字颜色」的显式反面，也是最常用的一个具体色：没有它就只能拿取色器去凑
+    const {section, colorSwatchesOf, close} = createFixture();
+    for (const direction of ["underline", "overline"]) {
+        const black = section(direction).querySelector('[data-sue-color="#000000"]');
+        assert.ok(black, `${direction} 区块缺纯黑色块`);
+        assert.ok(
+            colorSwatchesOf(direction).includes(black),
+            "纯黑必须是预设色块，不能被当成自定义色的临时色块",
+        );
+        assert.equal(black.getAttribute("aria-pressed"), "false");
+        assert.equal(black.title, "#000000", "悬停提示给出颜色原值");
+        // 纯黑同样要过白名单：它会跟着装饰进文档 HTML
+        assert.match(black.getAttribute("data-sue-color"), COLOR_PATTERN);
     }
     close();
 });
@@ -618,7 +636,7 @@ test("挑了自定义色之后整行只有一个色块被选中，换回预设�
     assert.equal(customSwatchesOf("underline").length, 1, "自定义色补一块临时色块");
     assert.equal(customSwatchOf("underline").getAttribute("aria-pressed"), "true");
     assert.equal(selectedCountIn(section("underline")), 1, "整行只允许一个选中项");
-    assert.equal(colorSwatchesOf("underline").length, 10, "预设色板仍是 10 块，临时色块不算预设");
+    assert.equal(colorSwatchesOf("underline").length, 11, "预设色板仍是 11 块，临时色块不算预设");
 
     colorSwatchesOf("underline")[5].click();
     assert.equal(lastChange().underline.color, "#0090ff");
@@ -1179,5 +1197,31 @@ test("面板根有不透明表面，且不挂思源未定义的浮层类", () =>
         follow[1],
         /border:\s*1px\s+dashed\s+var\(--b3-/,
         "这圈边框必须带主题变量兜底，且用虚线与实心颜色块区分开",
+    );
+
+    // 颜色色块同样需要一圈实线边框：色板里有纯黑，而深色主题的面板本身也偏黑，
+    // 没有这圈边框时纯黑那块与面板底色连成一片，用户既找不着它也点不着它。
+    // 同样以 panel.ts 实际写出的属性名为准
+    assert.match(panelSource, /const COLOR_ATTRIBUTE = "([^"]+)"/, "panel.ts 里必须有颜色色块的标记常量");
+    const colorAttribute = /const COLOR_ATTRIBUTE = "([^"]+)"/.exec(panelSource)[1];
+    const colorSwatch = new RegExp(`\\[${colorAttribute}\\]\\s*\\{([^}]*)\\}`).exec(scss);
+    assert.ok(colorSwatch, `index.scss 里必须有 [${colorAttribute}] 规则`);
+    assert.match(
+        colorSwatch[1],
+        /border:\s*1px\s+solid\s+var\(--b3-border-color[^;]*;/,
+        "颜色色块必须有发丝实线边框，且用 --b3-border-color 才能在深浅主题里都看得见",
+    );
+    // 边框会挤进盒模型，色块宽度必须仍是 32px 那一份
+    assert.match(colorSwatch[1], /box-sizing:\s*border-box\s*;/, "颜色色块加了边框，必须同时收住盒模型");
+    // 只许改颜色色块自身：规则体里除了收盒模型与那圈边框不得再有别的声明，
+    // 顺带改到线型色块、跟随文字色色块或其它控件都不在这次改动的范围内
+    const declarations = colorSwatch[1]
+        .split(";")
+        .map((line) => line.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "").trim())
+        .filter((line) => line !== "");
+    assert.deepEqual(
+        declarations.map((line) => line.split(":")[0].trim()),
+        ["box-sizing", "border"],
+        `颜色色块规则里只应有盒模型与边框：${declarations.join("; ")}`,
     );
 });

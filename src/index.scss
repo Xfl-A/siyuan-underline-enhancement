@@ -80,6 +80,15 @@
   border: 1px dashed var(--b3-border-color, #e0e0e0);
 }
 
+/* 颜色色块补一圈发丝边框。色板里有纯黑，深色主题的面板本身也偏黑：
+   没有这圈边框时纯黑那块与面板底色连成一片，用户既找不着它也点不着它。
+   只加在颜色色块上：线型色块靠自身文字画线，而「跟随文字色」那圈虚线就在上一条规则里。
+   边框色沿用 --b3-border-color，与上面那圈虚线同源，因此深浅主题各自都看得见。 */
+[data-sue-panel] [data-sue-color] {
+  box-sizing: border-box;
+  border: 1px solid var(--b3-border-color, #e0e0e0);
+}
+
 /* 选中态：向外扩一圈，不盖住色块自身的颜色 */
 [data-sue-panel] .sue-swatch--selected {
   box-shadow: 0 0 0 2px var(--b3-primary-color, var(--b3-theme-color, currentColor));

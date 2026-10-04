@@ -42,11 +42,27 @@ test("LINE_STYLES holds exactly the five supported line styles in panel order", 
     assert.deepEqual([...LINE_STYLES], ["solid", "dashed", "dotted", "double", "wavy"]);
 });
 
-test("PRESET_COLORS holds ten colors and every one of them passes the whitelist", () => {
-    assert.equal(PRESET_COLORS.length, 10);
+test("PRESET_COLORS holds eleven colors and every one of them passes the whitelist", () => {
+    assert.equal(PRESET_COLORS.length, 11);
     for (const color of PRESET_COLORS) {
         assert.equal(isValidColor(color), true, `预设色必须能通过白名单：${color}`);
     }
+    // 两块同色色块点上去毫无区别，用户只会以为面板没响应
+    const seen = new Set();
+    for (const color of PRESET_COLORS) {
+        assert.equal(seen.has(color), false, `预设色不得重复：${color}`);
+        seen.add(color);
+    }
+});
+
+test("PRESET_COLORS 含纯黑，且它排在色相遍历之外", () => {
+    // 纯黑是「跟随文字颜色」那个自适应选项的显式反面，因此必须随时可达；
+    // 它不是色相，插在色相中间会被读成相邻某色的深浅版，所以排在末位（与主题变量同侧）
+    assert.equal(PRESET_COLORS.includes("#000000"), true, "色板必须给出纯黑");
+    assert.equal(PRESET_COLORS.at(-1), "#000000", "纯黑排在色相遍历之后");
+    // 色相遍历仍是一个连续的色相序列，不能被纯黑打断
+    assert.equal(PRESET_COLORS.indexOf("#000000"), PRESET_COLORS.length - 1);
+    assert.equal(PRESET_COLORS[PRESET_COLORS.length - 2], "var(--b3-font-color8)");
 });
 
 test("共享常量都被冻结，导入方改不到会话的回退底座", () => {
@@ -58,7 +74,7 @@ test("共享常量都被冻结，导入方改不到会话的回退底座", () =>
     const throwsTypeError = (write) => {
         assert.throws(write, (error) => error.name === "TypeError");
     };
-    throwsTypeError(() => model.PRESET_COLORS.push("#000000"));
+    throwsTypeError(() => model.PRESET_COLORS.push("#123456"));
     throwsTypeError(() => {
         model.LINE_STYLES[0] = "zigzag";
     });

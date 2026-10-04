@@ -49,7 +49,14 @@ export const LINE_STYLES: readonly TLineStyle[] = Object.freeze(
     ["solid", "dashed", "dotted", "double", "wavy"] as TLineStyle[],
 );
 
-/** 预设色板；每一项都通过颜色白名单，自定义色由取色器追加（同样冻结，理由见 LINE_STYLES） */
+/**
+ * 预设色板；每一项都通过颜色白名单，自定义色由取色器追加（同样冻结，理由见 LINE_STYLES）
+ *
+ * 前九项是一趟色相遍历，红→橙→琥珀→绿→绿→蓝→紫→粉→黄，挨着的两色因此不会互为深浅版。
+ * 末两项刻意留在遍历之外：主题变量是唯一取值随主题变的色，纯黑则不是色相，
+ * 它是「跟随文字颜色」那个自适应选项的显式反面。黑色放在色相中段会被读成相邻某色的深浅版，
+ * 因此两者一起收在末尾。
+ */
 export const PRESET_COLORS: readonly string[] = Object.freeze([
     "#e5484d",
     "#f76b15",
@@ -61,6 +68,7 @@ export const PRESET_COLORS: readonly string[] = Object.freeze([
     "#d6409f",
     "#f5d90a",
     "var(--b3-font-color8)",
+    "#000000",
 ]);
 
 /**
