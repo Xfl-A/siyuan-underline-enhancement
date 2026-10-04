@@ -29,6 +29,14 @@ const SAVE_DEBOUNCE_MS = 300;
 /** 装饰 span 的落盘形态：只剩那几条 text-decoration 声明，插件不写任何标记属性 */
 const DECORATED_UNDERLINE = /<span style="text-decoration-line: underline; text-decoration-style: wavy(?:;|")/;
 const DECORATED_UNDERLINE_DOTTED = /<span style="text-decoration-line: underline; text-decoration-style: dotted(?:;|")/;
+/** 上划线的两种线型；两个方向同时打开时上划线是外层那一圈 */
+const DECORATED_OVERLINE = /<span style="text-decoration-line: overline; text-decoration-style: wavy(?:;|")/;
+const DECORATED_OVERLINE_DOTTED = /<span style="text-decoration-line: overline; text-decoration-style: dotted(?:;|")/;
+/** 指定颜色的装饰；重渲染之后改动有没有落到活着的块上，就看这一条出不出现在块 HTML 里 */
+const DECORATED_UNDERLINE_BLUE =
+    /text-decoration-line: underline; text-decoration-style: wavy; text-decoration-color: #0090ff/;
+const DECORATED_OVERLINE_RED =
+    /text-decoration-line: overline; text-decoration-style: dotted; text-decoration-color: #e5484d/;
 /** 块里还有没有装饰 span；清除、撤销之后都该为 false */
 const HAS_DECORATION_SPAN = /<span[^>]*style="[^"]*text-decoration-line/;
 
@@ -310,6 +318,23 @@ const createFixture = (options = {}) => {
         element.dispatchEvent(new window.Event("change", {bubbles: true}));
     };
 
+    /**
+     * 模拟思源重渲染一个块：outerHTML 往返会把节点本身换掉。
+     *
+     * 插件在打开面板时把块元素与可编辑区域按引用记进 this.groups / this.offsets，
+     * 这一句之后那些引用全部脱管：id 与内容都一样，只是已经不是文档里那个节点了
+     * （返回的就是脱管后的那一个，isConnected 为 false）。
+     */
+    const rerender = (blockId) => {
+        const element = block(blockId);
+        assert.ok(element, `块 ${blockId} 应当还在文档里`);
+        const html = element.outerHTML;
+        element.outerHTML = html;
+        assert.notEqual(block(blockId), element, "重渲染应当换掉节点本身");
+        assert.equal(element.isConnected, false, "旧引用应当已经脱管");
+        return element;
+    };
+
     return {
         document,
         calls,
@@ -337,6 +362,7 @@ const createFixture = (options = {}) => {
         pressed,
         click,
         toggle,
+        rerender,
         requestedI18NKeys: () => [...new Set(requestedI18NKeys)],
         respondWith: (...queued) => {
             responses = responses.concat(queued);
@@ -610,6 +636,214 @@ test("callout 标题区撤销之后再改设置，装饰仍然落在标题上", 
     f.click(f.styleSwatchOf("underline", "dotted"));
     assert.match(title().outerHTML, DECORATED_UNDERLINE_DOTTED);
     assert.equal(HAS_DECORATION_SPAN.test(f.blockHTML(BLOCK_A)), false);
+});
+
+// ------------------------------------------ 面板开着时思源重渲染了块
+
+/**
+ * 思源随时会重渲染块，而面板记下的分组与字符偏移都是按引用拿住的。
+ * 这些用例用 outerHTML 往返把块节点整个换掉（内容与 id 一模一样，节点本身已是另一个），
+ * 逐条对着用户看得见的症状断言。
+ */
+test("重渲染之后下划线的第二次线型改动仍然落到活着的块上，并各发一次 updateBlock", async () => {
+    const f = createFixture({blocks: TWO_BLOCKS_HTML});
+    f.plugin.onload();
+    await f.plugin.onLayoutReady();
+    f.clickToolbarItem(f.protyleOf(f.crossRange()));
+    f.click(f.styleSwatchOf("underline", "wavy"));
+    await settle();
+    assert.deepEqual(f.posts.map((post) => post.data.id), [BLOCK_A, BLOCK_B]);
+
+    f.rerender(BLOCK_A);
+    f.rerender(BLOCK_B);
+    f.click(f.styleSwatchOf("underline", "dotted"));
+    await settle();
+
+    // 装饰必须出现在文档里那个节点上，用户在屏幕上才看得到
+    assert.match(f.blockHTML(BLOCK_A), DECORATED_UNDERLINE_DOTTED, "第一段的线型要真的换成 dotted");
+    assert.match(f.blockHTML(BLOCK_B), DECORATED_UNDERLINE_DOTTED, "第二段也要换");
+    assert.deepEqual(f.posts.map((post) => post.data.id), [BLOCK_A, BLOCK_B, BLOCK_A, BLOCK_B]);
+    // 落盘的内容必须是活着的块现在的 HTML：拿着脱管节点发出去的是改动前的旧 HTML
+    assert.equal(f.posts[2].data.data, f.block(BLOCK_A).outerHTML);
+    assert.equal(f.posts[3].data.data, f.block(BLOCK_B).outerHTML);
+    assert.equal(f.posts[2].data.dataType, "dom");
+});
+
+test("重渲染之后上划线的第二次线型改动仍然落到活着的块上，并各发一次 updateBlock", async () => {
+    const f = createFixture({blocks: TWO_BLOCKS_HTML});
+    f.plugin.onload();
+    await f.plugin.onLayoutReady();
+    f.clickToolbarItem(f.protyleOf(f.crossRange()));
+    f.toggle(f.switchOf("overline"), true);
+    f.click(f.styleSwatchOf("overline", "dotted"));
+    await settle();
+    assert.match(f.blockHTML(BLOCK_A), DECORATED_OVERLINE_DOTTED);
+    assert.deepEqual(f.posts.map((post) => post.data.id).sort(), [BLOCK_A, BLOCK_B].sort());
+
+    f.rerender(BLOCK_A);
+    f.rerender(BLOCK_B);
+    f.click(f.styleSwatchOf("overline", "wavy"));
+    await settle();
+
+    assert.match(f.blockHTML(BLOCK_A), DECORATED_OVERLINE, "第一段的上划线要真的换成 wavy");
+    assert.match(f.blockHTML(BLOCK_B), DECORATED_OVERLINE, "第二段也要换");
+    assert.equal(f.posts.length, 4);
+    assert.deepEqual(f.posts.slice(2).map((post) => post.data.id), [BLOCK_A, BLOCK_B]);
+    assert.equal(f.posts[2].data.data, f.block(BLOCK_A).outerHTML);
+    assert.equal(f.posts[3].data.data, f.block(BLOCK_B).outerHTML);
+});
+
+test("重渲染之后下划线的第二次颜色改动仍然落到活着的块上，并各发一次 updateBlock", async () => {
+    const f = createFixture({blocks: TWO_BLOCKS_HTML});
+    f.plugin.onload();
+    await f.plugin.onLayoutReady();
+    f.clickToolbarItem(f.protyleOf(f.crossRange()));
+    f.click(f.styleSwatchOf("underline", "wavy"));
+    await settle();
+    assert.equal(f.posts.length, 2);
+
+    f.rerender(BLOCK_A);
+    f.rerender(BLOCK_B);
+    f.click(f.colorSwatchOf("underline", "#0090ff"));
+    await settle();
+
+    assert.match(f.blockHTML(BLOCK_A), DECORATED_UNDERLINE_BLUE, "第一段的颜色要真的换成蓝色");
+    assert.match(f.blockHTML(BLOCK_B), DECORATED_UNDERLINE_BLUE, "第二段也要换");
+    assert.equal(f.posts.length, 4);
+    assert.deepEqual(f.posts.slice(2).map((post) => post.data.id), [BLOCK_A, BLOCK_B]);
+    assert.equal(f.posts[2].data.data, f.block(BLOCK_A).outerHTML);
+    assert.equal(f.posts[3].data.data, f.block(BLOCK_B).outerHTML);
+});
+
+test("重渲染之上划线的第二次颜色改动仍然落到活着的块上，并各发一次 updateBlock", async () => {
+    const f = createFixture({blocks: TWO_BLOCKS_HTML});
+    f.plugin.onload();
+    await f.plugin.onLayoutReady();
+    f.clickToolbarItem(f.protyleOf(f.crossRange()));
+    f.toggle(f.switchOf("overline"), true);
+    f.click(f.styleSwatchOf("overline", "dotted"));
+    await settle();
+    assert.equal(f.posts.length, 2);
+
+    f.rerender(BLOCK_A);
+    f.rerender(BLOCK_B);
+    f.click(f.colorSwatchOf("overline", "#e5484d"));
+    await settle();
+
+    assert.match(f.blockHTML(BLOCK_A), DECORATED_OVERLINE_RED, "第一段的上划线要真的变成红色");
+    assert.match(f.blockHTML(BLOCK_B), DECORATED_OVERLINE_RED, "第二段也要换");
+    assert.equal(f.posts.length, 4);
+    assert.deepEqual(f.posts.slice(2).map((post) => post.data.id), [BLOCK_A, BLOCK_B]);
+    assert.equal(f.posts[2].data.data, f.block(BLOCK_A).outerHTML);
+    assert.equal(f.posts[3].data.data, f.block(BLOCK_B).outerHTML);
+});
+
+test("重渲染之后重建的选区落在活着的文档上，而不是脱管的那一份里", async () => {
+    const f = createFixture({blocks: TWO_BLOCKS_HTML});
+    f.plugin.onload();
+    await f.plugin.onLayoutReady();
+    f.clickToolbarItem(f.protyleOf(f.crossRange()));
+    f.click(f.styleSwatchOf("underline", "wavy"));
+    // 换掉的节点把插件记下的块元素、可编辑区域与选区坐标一并带走了
+    f.rerender(BLOCK_A);
+    f.rerender(BLOCK_B);
+
+    f.click(f.styleSwatchOf("underline", "dotted"));
+
+    const selection = f.document.getSelection();
+    assert.ok(selection.rangeCount > 0, "选区必须回到文档上，用户才能接着输入");
+    assert.equal(selection.toString(), "helloworld", "选中的文字要和打开面板时一致");
+    assert.ok(f.block(BLOCK_A).contains(selection.anchorNode), "起点要落在活着的第一段里");
+    assert.ok(f.block(BLOCK_B).contains(selection.focusNode), "终点要落在活着的第二段里");
+});
+
+test("重渲染之后清除装饰，活着的块上不再有装饰", async () => {
+    const f = createFixture({blocks: TWO_BLOCKS_HTML});
+    f.plugin.onload();
+    await f.plugin.onLayoutReady();
+    f.clickToolbarItem(f.protyleOf(f.crossRange()));
+    f.click(f.styleSwatchOf("underline", "wavy"));
+    f.toggle(f.switchOf("overline"), true);
+    await settle();
+    assert.equal(HAS_DECORATION_SPAN.test(f.blockHTML(BLOCK_A)), true, "前置条件：两个方向都装饰上了");
+
+    f.rerender(BLOCK_A);
+    f.rerender(BLOCK_B);
+    f.click(f.actionButton("clear"));
+
+    assert.equal(HAS_DECORATION_SPAN.test(f.blockHTML(BLOCK_A)), false, "第一段的装饰要真的被清掉");
+    assert.equal(HAS_DECORATION_SPAN.test(f.blockHTML(BLOCK_B)), false, "第二段也要被清掉");
+    await settle();
+    // 清除本身也要落盘，否则磁盘上还留着上一版装饰
+    assert.deepEqual(f.posts.slice(2).map((post) => post.data.id), [BLOCK_A, BLOCK_B]);
+    assert.equal(HAS_DECORATION_SPAN.test(f.posts[2].data.data), false);
+    assert.equal(HAS_DECORATION_SPAN.test(f.posts[3].data.data), false);
+});
+
+test("重渲染之后关掉下划线，活着的块上只留下上划线", async () => {
+    const f = createFixture({blocks: TWO_BLOCKS_HTML});
+    f.plugin.onload();
+    await f.plugin.onLayoutReady();
+    f.clickToolbarItem(f.protyleOf(f.crossRange()));
+    f.click(f.styleSwatchOf("underline", "wavy"));
+    f.toggle(f.switchOf("overline"), true);
+    f.click(f.styleSwatchOf("overline", "dotted"));
+    await settle();
+    assert.match(f.blockHTML(BLOCK_A), DECORATED_UNDERLINE);
+    assert.match(f.blockHTML(BLOCK_A), DECORATED_OVERLINE_DOTTED);
+
+    f.rerender(BLOCK_A);
+    f.rerender(BLOCK_B);
+    f.toggle(f.switchOf("underline"), false);
+
+    // 只是关掉一个方向：另一个方向原样留着，两块因此都仍然带着装饰
+    assert.equal(f.blockHTML(BLOCK_A).includes("text-decoration-line: underline"), false, "第一段的下划线要去掉");
+    assert.equal(f.blockHTML(BLOCK_B).includes("text-decoration-line: underline"), false, "第二段的下划线要去掉");
+    assert.match(f.blockHTML(BLOCK_A), DECORATED_OVERLINE_DOTTED, "第一段的上划线原样留着");
+    assert.match(f.blockHTML(BLOCK_B), DECORATED_OVERLINE_DOTTED, "第二段的上划线原样留着");
+});
+
+test("重渲染之后关上划线，活着的块上只留下下划线", async () => {
+    const f = createFixture({blocks: TWO_BLOCKS_HTML});
+    f.plugin.onload();
+    await f.plugin.onLayoutReady();
+    f.clickToolbarItem(f.protyleOf(f.crossRange()));
+    f.click(f.styleSwatchOf("underline", "wavy"));
+    f.toggle(f.switchOf("overline"), true);
+    f.click(f.styleSwatchOf("overline", "dotted"));
+    await settle();
+    assert.match(f.blockHTML(BLOCK_A), DECORATED_UNDERLINE);
+
+    f.rerender(BLOCK_A);
+    f.rerender(BLOCK_B);
+    f.toggle(f.switchOf("overline"), false);
+
+    assert.equal(f.blockHTML(BLOCK_A).includes("text-decoration-line: overline"), false, "第一段的上划线要去掉");
+    assert.equal(f.blockHTML(BLOCK_B).includes("text-decoration-line: overline"), false, "第二段的上划线要去掉");
+    assert.match(f.blockHTML(BLOCK_A), DECORATED_UNDERLINE, "第一段的下划线原样留着");
+    assert.match(f.blockHTML(BLOCK_B), DECORATED_UNDERLINE, "第二段的下划线原样留着");
+});
+
+test("重渲染之后的改动只写活着的块，脱管的那一份不会被改到", async () => {
+    const f = createFixture({blocks: TWO_BLOCKS_HTML});
+    f.plugin.onload();
+    await f.plugin.onLayoutReady();
+    f.clickToolbarItem(f.protyleOf(f.crossRange()));
+    f.click(f.styleSwatchOf("underline", "wavy"));
+    await settle();
+
+    // 只重渲染第一段：跨块选区里两组的引用会一个脱管、一个仍然连着文档
+    const detached = f.rerender(BLOCK_A);
+    f.click(f.colorSwatchOf("underline", "#0090ff"));
+    await settle();
+
+    assert.match(f.blockHTML(BLOCK_A), DECORATED_UNDERLINE_BLUE, "改动要落在文档里那个块上");
+    assert.equal(detached.innerHTML.includes("#0090ff"), false, "脱管的旧副本不该被改到");
+    assert.match(f.blockHTML(BLOCK_B), DECORATED_UNDERLINE_BLUE, "仍然连着文档的那一段照旧改得到");
+    // 脱管的那一份也不会被发出去：第二次改动对第一段仍然是一次正常的落盘
+    const firstBlockPosts = f.posts.filter((post) => post.data.id === BLOCK_A);
+    assert.equal(firstBlockPosts.length, 2, "重渲染之后的第一段仍然要发请求");
+    assert.equal(firstBlockPosts[1].data.data, f.block(BLOCK_A).outerHTML);
 });
 
 test("撤销把块换回改动前的样子，并按文档里的真实状态刷新面板", async () => {

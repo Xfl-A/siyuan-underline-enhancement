@@ -208,6 +208,9 @@ export default class UnderlineEnhancement extends Plugin {
      * 按一次撤销就该整体退回，而不是只退回最后一个块。
      */
     private applyPair(pair: IDecorationPair): void {
+        // 思源随时会重渲染块，面板开着期间记下的引用随时可能脱管：每次应用都先重新认领，
+        // 读块 HTML、包裹装饰与重建选区才都落在文档里那个节点上
+        this.claimBlocks();
         const specs = composePair(sanitizePair(pair));
         const changed: IBlockChange[] = [];
         for (const group of this.groups) {
@@ -254,12 +257,13 @@ export default class UnderlineEnhancement extends Plugin {
     }
 
     /**
-     * 撤销后的重新认领。
+     * 块节点被换掉之后的重新认领。
      *
-     * 撤销是把整块 HTML 换回去，块连同子树一起换掉，之前拿在手里的引用随即脱管；
-     * 不重新认领的话，下一次改动会去装饰一个已经不在文档里的节点：屏幕上什么也不出现，
-     * 磁盘上多一次内容没变的 updateBlock，面板显示的选区也不存在，下一次撤销还会因
-     * afterHTML 校验不过而被静默丢弃。可编辑区域本身是新块里的哪一个，由 dom.ts 按位置判定。
+     * 撤销把整块 HTML 写回去、思源自己重渲染块，两条路都会让块连同子树一起换掉，
+     * 之前拿在手里的引用随即脱管；不重新认领的话，下一次改动会去装饰一个已经不在文档里的节点：
+     * 屏幕上什么也不出现，磁盘上多一次内容没变的 updateBlock，面板显示的选区也不存在，
+     * 下一次撤销还会因 afterHTML 校验不过而被静默丢弃。可编辑区域本身是新块里的哪一个，
+     * 由 dom.ts 按位置判定。
      */
     private claimBlocks(): void {
         for (let i = 0; i < this.groups.length; i++) {
