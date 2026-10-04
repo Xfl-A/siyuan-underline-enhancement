@@ -26,9 +26,11 @@ const SETTINGS_FILE = "settings.json";
 /** 防抖保存窗口（ms），与 src/index.ts 的常量一致 */
 const SAVE_DEBOUNCE_MS = 300;
 
-/** 装饰 span 的落盘形态：data-sue 标记 + 完整的 inline style */
-const DECORATED_UNDERLINE = /<span data-sue="u"[^>]*text-decoration-style: wavy[^>]*>/;
-const DECORATED_UNDERLINE_DOTTED = /<span data-sue="u"[^>]*text-decoration-style: dotted[^>]*>/;
+/** 装饰 span 的落盘形态：只剩那几条 text-decoration 声明，插件不写任何标记属性 */
+const DECORATED_UNDERLINE = /<span style="text-decoration-line: underline; text-decoration-style: wavy(?:;|")/;
+const DECORATED_UNDERLINE_DOTTED = /<span style="text-decoration-line: underline; text-decoration-style: dotted(?:;|")/;
+/** 块里还有没有装饰 span；清除、撤销之后都该为 false */
+const HAS_DECORATION_SPAN = /<span[^>]*style="[^"]*text-decoration-line/;
 
 /** 单块选区：一个只有纯文本的段落 */
 const SINGLE_BLOCK_HTML = `<p data-type="text" data-node-id="${BLOCK_A}">hello</p>`;
@@ -51,13 +53,18 @@ const CALLOUT_HTML = `<div data-type="NodeCallout" data-node-id="${CALLOUT_ID}">
     '<div class="callout-info"><div class="callout-title">title text</div></div>' +
     `<p data-type="text" data-node-id="${BLOCK_A}">body text</p></div>`;
 
-/** 已装饰的块：外层上划线、内层下划线，正是 composePair 的嵌套输出 */
+/**
+ * 已装饰的块：外层上划线、内层下划线，正是 composePair 的嵌套输出。
+ * 形态照抄思源从 .sy 重新渲染的结果：只有 data-type 与那几条声明，没有任何标记属性。
+ */
 const NESTED_CSS = {
     overline: "text-decoration-line: overline; text-decoration-style: dotted; text-decoration-color: #0090ff",
     underline: "text-decoration-line: underline; text-decoration-style: wavy; text-decoration-color: #e5484d",
 };
-const NESTED_HTML = `<p data-type="text" data-node-id="${BLOCK_A}"><span data-sue="o" style="${NESTED_CSS.overline}">` +
-    `<span data-sue="u" style="${NESTED_CSS.underline}">hello</span></span></p>`;
+const savedDecoration = (css, text) => `<span data-type="text" style="${css}">${text}</span>`;
+const NESTED_HTML = `<p data-type="text" data-node-id="${BLOCK_A}">${
+    savedDecoration(NESTED_CSS.overline, savedDecoration(NESTED_CSS.underline, "hello"))
+}</p>`;
 
 const OK_RESPONSE = {code: 0, msg: "", data: null};
 const FAILED_RESPONSE = {code: -1, msg: "kernel busy", data: null};
@@ -406,8 +413,8 @@ test("跨两段应用后按一次撤销就把两段一起退回", async () => {
 
     // 用户做的是一次操作，撤销也必须是一次：只退回后一段的话，
     // 面板还显示着「下划线开启 / 波浪线」，实际却有一半选区没有装饰
-    assert.equal(f.blockHTML(BLOCK_A).includes("data-sue"), false, "第一段也要一起退回");
-    assert.equal(f.blockHTML(BLOCK_B).includes("data-sue"), false, "第二段要退回");
+    assert.equal(HAS_DECORATION_SPAN.test(f.blockHTML(BLOCK_A)), false, "第一段也要一起退回");
+    assert.equal(HAS_DECORATION_SPAN.test(f.blockHTML(BLOCK_B)), false, "第二段要退回");
     assert.equal(f.blockHTML(BLOCK_A), SINGLE_BLOCK_HTML);
     assert.equal(f.blockHTML(BLOCK_B), `<p data-type="text" data-node-id="${BLOCK_B}">world</p>`);
     // 一次操作只记一条记录，撤完栈就该空了
@@ -421,7 +428,7 @@ test("选区内的装饰不一致时面板先给出混合提示，点一下才�
     // 只有第二块被装饰过，第一块是干净的：只读第一块的话，
     // 面板会拿默认值开场，用户随手一点就把第二块的装饰改掉了，且事先没有任何提示
     const html = `<p data-type="text" data-node-id="${BLOCK_A}">hello</p>` +
-        `<p data-type="text" data-node-id="${BLOCK_B}"><span data-sue="u" style="${NESTED_CSS.underline}">world</span></p>`;
+        `<p data-type="text" data-node-id="${BLOCK_B}">${savedDecoration(NESTED_CSS.underline, "world")}</p>`;
     const f = createFixture({blocks: html});
     f.plugin.onload();
     f.clickToolbarItem(f.protyleOf(f.crossRange()));
@@ -440,10 +447,8 @@ test("选区内的装饰不一致时面板先给出混合提示，点一下才�
 });
 
 test("选区内的装饰一致时不显示混合提示", () => {
-    const html = `<p data-type="text" data-node-id="${BLOCK_A}">` +
-        `<span data-sue="u" style="${NESTED_CSS.underline}">hello</span></p>` +
-        `<p data-type="text" data-node-id="${BLOCK_B}">` +
-        `<span data-sue="u" style="${NESTED_CSS.underline}">world</span></p>`;
+    const html = `<p data-type="text" data-node-id="${BLOCK_A}">${savedDecoration(NESTED_CSS.underline, "hello")}</p>` +
+        `<p data-type="text" data-node-id="${BLOCK_B}">${savedDecoration(NESTED_CSS.underline, "world")}</p>`;
     const f = createFixture({blocks: html});
     f.plugin.onload();
     f.clickToolbarItem(f.protyleOf(f.crossRange()));
@@ -480,7 +485,7 @@ test("面板里的改动落到选区上，跨块时每个块各发一次 updateB
     assert.deepEqual(f.posts.map((post) => post.data.id).sort(), [BLOCK_A, BLOCK_B].sort());
     for (const post of f.posts) {
         assert.equal(post.data.dataType, "dom");
-        assert.match(post.data.data, /<span data-sue="u"/);
+        assert.match(post.data.data, /<span style="text-decoration-line: underline/);
     }
 });
 
@@ -525,7 +530,7 @@ test("清除装饰去掉两个方向的装饰，并把面板的选中态刷回�
     assert.equal(f.pressed(f.styleSwatchOf("underline", "wavy")), true);
     await settle();
     f.click(f.actionButton("clear"));
-    assert.equal(f.blockHTML(BLOCK_A).includes("data-sue"), false);
+    assert.equal(HAS_DECORATION_SPAN.test(f.blockHTML(BLOCK_A)), false);
     // 面板自己看不到文档的变化，setPair 缺失时下面三项都会停在清除前的样子
     assert.equal(f.pressed(f.styleSwatchOf("underline", "wavy")), false);
     assert.equal(f.switchOf("underline").checked, false);
@@ -533,7 +538,7 @@ test("清除装饰去掉两个方向的装饰，并把面板的选中态刷回�
     await settle();
     // 清除本身也要落盘，否则磁盘上还留着上一版装饰
     assert.deepEqual(f.posts.map((post) => post.data.id), [BLOCK_A, BLOCK_A]);
-    assert.equal(f.posts[1].data.data.includes("data-sue"), false);
+    assert.equal(HAS_DECORATION_SPAN.test(f.posts[1].data.data), false);
 });
 
 test("关掉再打开某个方向时沿用它上次的线型与颜色", () => {
@@ -542,8 +547,8 @@ test("关掉再打开某个方向时沿用它上次的线型与颜色", () => {
     f.clickToolbarItem();
     f.toggle(f.switchOf("underline"), false);
     // 下划线关掉后内层 span 消失，外层上划线原样留着；线型与颜色仍留在面板上
-    assert.equal(f.blockHTML(BLOCK_A).includes('data-sue="u"'), false);
-    assert.match(f.blockHTML(BLOCK_A), /data-sue="o"/);
+    assert.equal(f.blockHTML(BLOCK_A).includes("text-decoration-line: underline"), false);
+    assert.match(f.blockHTML(BLOCK_A), /text-decoration-line: overline/);
     assert.equal(f.pressed(f.styleSwatchOf("underline", "wavy")), true);
     f.toggle(f.switchOf("underline"), true);
     assert.match(f.blockHTML(BLOCK_A), DECORATED_UNDERLINE);
@@ -579,7 +584,7 @@ test("表格单元格里撤销之后再改设置，装饰仍然落在文档上",
     assert.match(f.blockHTML(BLOCK_A), DECORATED_UNDERLINE);
     f.click(f.actionButton("undo"));
     await tick();
-    assert.equal(f.blockHTML(BLOCK_A).includes("data-sue"), false);
+    assert.equal(HAS_DECORATION_SPAN.test(f.blockHTML(BLOCK_A)), false);
     // 撤销换掉的是整张表的 HTML：这一组必须重新认领到文档里的单元格，否则改的是脱管的节点
     f.click(f.styleSwatchOf("underline", "dotted"));
     assert.match(f.blockHTML(BLOCK_A), DECORATED_UNDERLINE_DOTTED);
@@ -600,11 +605,11 @@ test("callout 标题区撤销之后再改设置，装饰仍然落在标题上", 
     assert.match(title().outerHTML, DECORATED_UNDERLINE);
     f.click(f.actionButton("undo"));
     await tick();
-    assert.equal(title().outerHTML.includes("data-sue"), false);
+    assert.equal(HAS_DECORATION_SPAN.test(title().outerHTML), false);
     // 标题区是新块里的哪一个由 dom.ts 按位置判定：认错了就会去装饰正文段落
     f.click(f.styleSwatchOf("underline", "dotted"));
     assert.match(title().outerHTML, DECORATED_UNDERLINE_DOTTED);
-    assert.equal(f.blockHTML(BLOCK_A).includes("data-sue"), false);
+    assert.equal(HAS_DECORATION_SPAN.test(f.blockHTML(BLOCK_A)), false);
 });
 
 test("撤销把块换回改动前的样子，并按文档里的真实状态刷新面板", async () => {
@@ -616,7 +621,7 @@ test("撤销把块换回改动前的样子，并按文档里的真实状态刷�
     await settle();
     f.click(f.actionButton("clear"));
     await settle();
-    assert.equal(f.blockHTML(BLOCK_A).includes("data-sue"), false);
+    assert.equal(HAS_DECORATION_SPAN.test(f.blockHTML(BLOCK_A)), false);
     assert.equal(f.actionButton("undo").disabled, false);
     f.click(f.actionButton("undo"));
     await tick();
@@ -629,8 +634,10 @@ test("撤销把块换回改动前的样子，并按文档里的真实状态刷�
     assert.equal(f.actionButton("undo").disabled, false);
 });
 
-test("打开面板时按选区里已有的 data-sue 装饰回填两个方向", () => {
+test("打开面板时按选区里已有装饰的 text-decoration 声明回填两个方向", () => {
+    // 夹具是思源存盘后重新渲染出来的形态：span 上只有 data-type 与 style，没有任何标记属性
     const f = createFixture({blocks: NESTED_HTML});
+    assert.equal(f.blockHTML(BLOCK_A).includes("data-sue"), false, "夹具里本来就没有任何标记属性");
     f.plugin.onload();
     f.clickToolbarItem();
     assert.equal(f.switchOf("underline").checked, true);
@@ -644,7 +651,7 @@ test("打开面板时按选区里已有的 data-sue 装饰回填两个方向", (
 test("落在选区之外的装饰不参与回填", () => {
     // 装饰在「decorated」那一段，选区只覆盖前面的「plain 」
     const html = `<p data-type="text" data-node-id="${BLOCK_A}">plain ` +
-        `<span data-sue="u" style="${NESTED_CSS.underline}">decorated</span> tail</p>`;
+        `${savedDecoration(NESTED_CSS.underline, "decorated")} tail</p>`;
     const f = createFixture({blocks: html});
     f.plugin.onload();
     f.clickToolbarItem(f.protyleOf(f.offsetRange(f.block(BLOCK_A), 0, 6)));

@@ -8,7 +8,8 @@ import {loadModule} from "./loadModule.mjs";
  *
  * @param {{frontend?: string}} [options] frontend 决定 getEventName 的返回值
  * @returns {{window: Window, document: Document, module: Record<string, unknown>, mount: (html: string) => () => void,
- *   select: Function, selectWithin: Function, textNodesOf: Function, decorationsIn: Function, close: () => void}}
+ *   select: Function, selectWithin: Function, textNodesOf: Function, decorationsIn: Function, declaredLines: Function,
+ *   decorationSpans: Function, close: () => void}}
  */
 export const createFixture = (options = {}) => {
     const frontend = options.frontend ?? "desktop";
@@ -85,10 +86,10 @@ export const createFixture = (options = {}) => {
         return range.toString().length;
     };
 
-    /** 区域内全部装饰 span 的快照：标记、样式与被包裹的文本 */
+    /** 区域内全部装饰 span 的快照：声明的装饰线、样式与被包裹的文本 */
     const decorationsIn = (root) =>
-        Array.from(root.querySelectorAll("[data-sue]")).map((span) => ({
-            marker: span.getAttribute("data-sue"),
+        decorationSpansIn(root).map((span) => ({
+            lines: declaredLines(span.getAttribute("style")),
             style: span.getAttribute("style"),
             text: span.textContent,
         }));
@@ -103,9 +104,31 @@ export const createFixture = (options = {}) => {
         offsetIn,
         textNodesOf,
         decorationsIn,
+        decorationSpans: decorationSpansIn,
+        declaredLines,
         close: () => window.close(),
     };
 };
+
+// 装饰的判定在测试侧独立写一份：照抄 src/dom.ts 的选择器会让断言变成自证。
+// 判定只看 inline style 声明的装饰线 —— 思源存盘会丢掉任何标记属性，样式是唯一留下来的身份。
+const LINE_KEYWORD = /^(?:underline|overline)$/;
+
+/** 一串 style 声明里声明了哪些装饰线，按出现顺序去重后拼成 "underline overline" 这样的字符串 */
+const declaredLines = (style) => {
+    const found = [];
+    for (const token of (style ?? "").split(/[\s,;:()]+/)) {
+        if (LINE_KEYWORD.test(token) && !found.includes(token)) {
+            found.push(token);
+        }
+    }
+    return found.join(" ");
+};
+
+/** 区域内全部装饰 span，文档顺序 */
+const decorationSpansIn = (root) =>
+    Array.from(root.querySelectorAll("span[style]"))
+        .filter((span) => declaredLines(span.getAttribute("style")) !== "");
 
 const assertPoint = (point) => {
     if (point === null) {

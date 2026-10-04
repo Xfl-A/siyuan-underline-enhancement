@@ -24,8 +24,17 @@ export interface IOffsetRange {
     end: number;
 }
 
-/** 装饰 span 的标记属性；值为下划线 u、上划线 o、两者合并 b */
-const MARK_ATTRIBUTE = "data-sue";
+/**
+ * 装饰 span 的候选：只带 inline style 的 span。
+ *
+ * 判定不再看任何标记属性：思源把块 HTML 解析成 AST 写进 .sy 时会丢掉自定义属性，
+ * 重新渲染出来的 span 里只剩 data-type="text" 与那几条 text-decoration-* 声明。
+ * 装饰身份因此只由 style 声明的装饰线决定，插件写出的 span 也不再带标记属性。
+ */
+const DECORATION_SPAN_SELECTOR = "span[style]";
+
+/** 装饰线关键字；按整枚 token 相等比对，underline.png 之类的字样不算声明 */
+const LINE_KEYWORDS = new Set(["underline", "overline"]);
 
 /** 一组装饰方向最多对应两个 span（外层上划线、内层下划线），读取时按这个上限截断 */
 const MAX_PAIR_SPANS = 2;
@@ -283,6 +292,46 @@ const offsetsOfElement = (index: Map<Node, number>, element: Element): IOffsetRa
 };
 
 /**
+ * 这串声明里有没有装饰线关键字。按 CSS token 切分：空格、逗号、分号、冒号与括号都算 token 边界，
+ * 于是 text-decoration-line:underline 与 url(underline.svg) 都能正确判出「是不是一枚完整的 token」。
+ */
+const declaresLine = (declarations: string): boolean => {
+    for (const token of declarations.split(/[\s,;:()]+/)) {
+        if (LINE_KEYWORDS.has(token.toLowerCase())) {
+            return true;
+        }
+    }
+    return false;
+};
+
+/**
+ * 这个 span 是不是本插件的装饰：只看它自己的 inline style 有没有声明装饰线。
+ *
+ * 只认 span：思源自己的 <u> 是用户按它工具栏按钮加的下划线，属于思源自己的行内标记。
+ * 带 style 的非 span 元素同样不算，装饰的落盘形态只有 span 一种。
+ *
+ * 读值先走 CSSOM（值已被浏览器归一）；长属性读不到时退回简写，简写也读不到时再退回 style 属性串 ——
+ * jsdom 不把 text-decoration 简写展开成 text-decoration-line，简写形态只能这样才认得出来。
+ * 长属性读到确定的值（例如 none）就以它为准，不再回头扫属性串。
+ */
+const isDecorationSpan = (element: Element): boolean => {
+    if (element.tagName !== "SPAN") {
+        return false;
+    }
+    const declarations = element.getAttribute("style");
+    if (!declarations) {
+        return false;
+    }
+    const style = (element as HTMLElement).style;
+    const longhand = style?.getPropertyValue("text-decoration-line") ?? "";
+    if (longhand !== "") {
+        return declaresLine(longhand);
+    }
+    const shorthand = style?.getPropertyValue("text-decoration") ?? "";
+    return declaresLine(shorthand !== "" ? shorthand : declarations);
+};
+
+/**
  * 区域内的装饰 span，文档顺序。
  *
  * 给出范围时只保留与它真正重叠的那些，判定按字符偏移做：spanStart < end && spanEnd > start。
@@ -295,7 +344,8 @@ const offsetsOfElement = (index: Map<Node, number>, element: Element): IOffsetRa
  * range 为 null 表示「整块都算」。
  */
 const decorationSpansIn = (editableElement: HTMLElement, range: IOffsetRange | null): HTMLElement[] => {
-    const spans = Array.from(editableElement.querySelectorAll(`[${MARK_ATTRIBUTE}]`)) as HTMLElement[];
+    const spans = Array.from(editableElement.querySelectorAll(DECORATION_SPAN_SELECTOR))
+        .filter(isDecorationSpan) as HTMLElement[];
     if (range === null) {
         return spans;
     }
@@ -426,7 +476,8 @@ const createRangeIn = (editableElement: HTMLElement, start: number, end: number)
 /** 用一个 spec 圈住 range，并把范围收敛到新 span 上，供上一层包裹套住它 */
 const wrapRange = (range: Range, spec: ISpanSpec): Range => {
     const span = range.startContainer.ownerDocument.createElement("span");
-    span.setAttribute(MARK_ATTRIBUTE, spec.marker);
+    // 装饰身份由 style 承载：多写一个标记属性只会多出一份能过期的真相，
+    // 而思源存盘时本来就会把它丢掉，落盘后的 span 反而认不回来
     span.setAttribute("style", spec.css);
     span.appendChild(range.extractContents());
     range.insertNode(span);

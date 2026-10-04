@@ -7,8 +7,6 @@
 export type TLineStyle = "solid" | "dashed" | "dotted" | "double" | "wavy";
 /** 单个 span 承载的装饰线 */
 export type TLinePosition = "underline" | "overline" | "both";
-/** data-sue 标记值 */
-export type TSueMarker = "u" | "o" | "b";
 
 export interface IDecoration {
     /** 该方向是否启用 */
@@ -24,10 +22,14 @@ export interface IDecorationPair {
     overline: IDecoration;
 }
 
-/** 一个装饰 span 的描述；marker 由调用方写成 data-sue 属性 */
+/**
+ * 一个装饰 span 的描述。
+ *
+ * 只有 css 一个字段会被写进 DOM：装饰身份完全由 text-decoration 声明决定，
+ * 方向另有一处从 css 解析，spec 自己不再携带第二份。
+ */
 export interface ISpanSpec {
     position: TLinePosition;
-    marker: TSueMarker;
     /** span 的 style 属性值 */
     css: string;
 }
@@ -327,6 +329,7 @@ export const buildDecorationCSS = (decoration: IDecoration, position: TLinePosit
 /**
  * 按合并规则产出一到两个 span 描述，返回顺序为**外层在前**（先上划线，后下划线）。
  * 两个方向都关闭时返回空数组，调用方只需剥离已有装饰。
+ * 每个描述只带一份方向信息，且就写在 css 里：调用方按 style 认出装饰，读写两侧据此对上同一段文字。
  */
 export const composePair = (pair: IDecorationPair): ISpanSpec[] => {
     const {underline, overline} = sanitizePair(pair);
@@ -334,18 +337,18 @@ export const composePair = (pair: IDecorationPair): ISpanSpec[] => {
         return [];
     }
     if (underline.enabled && !overline.enabled) {
-        return [{position: "underline", marker: "u", css: buildDecorationCSS(underline, "underline")}];
+        return [{position: "underline", css: buildDecorationCSS(underline, "underline")}];
     }
     if (!underline.enabled) {
-        return [{position: "overline", marker: "o", css: buildDecorationCSS(overline, "overline")}];
+        return [{position: "overline", css: buildDecorationCSS(overline, "overline")}];
     }
     // style 与 color 都相同就能合成一个 span；enabled 此刻已都为 true
     if (underline.style === overline.style && underline.color === overline.color) {
-        return [{position: "both", marker: "b", css: buildDecorationCSS(underline, "both")}];
+        return [{position: "both", css: buildDecorationCSS(underline, "both")}];
     }
     return [
-        {position: "overline", marker: "o", css: buildDecorationCSS(overline, "overline")},
-        {position: "underline", marker: "u", css: buildDecorationCSS(underline, "underline")},
+        {position: "overline", css: buildDecorationCSS(overline, "overline")},
+        {position: "underline", css: buildDecorationCSS(underline, "underline")},
     ];
 };
 

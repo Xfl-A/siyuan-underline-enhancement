@@ -22,10 +22,13 @@ const escapeAttribute = (value) => value.replaceAll("&", "&amp;").replaceAll('"'
 /** 未装饰的块 HTML；思源每个块都带 data-node-id，模块靠它定位与写回 */
 const blockHTML = (blockId, text) => `<p data-type="text" data-node-id="${escapeAttribute(blockId)}">${text}</p>`;
 
-/** 装饰之后的块 HTML：data-sue 标记 + inline style，正是要原样落进 .sy 文件的东西 */
+/**
+ * 装饰之后的块 HTML：只剩 inline style 的那几条声明，正是要原样落进 .sy 文件的东西。
+ * 思源存盘走 AST，自定义属性会被丢掉，因此落盘形态里没有任何标记属性。
+ */
 const decoratedHTML = (blockId, text) =>
     `<p data-type="text" data-node-id="${escapeAttribute(blockId)}">` +
-    `<span data-sue="u" style="${UNDERLINE_CSS}">${text}</span></p>`;
+    `<span data-type="text" style="${UNDERLINE_CSS}">${text}</span></p>`;
 
 /**
  * 可控时钟。防抖测试若依赖真实等待，慢机器上会偶发失败；这里让时间只在 advance 时前进。
@@ -460,7 +463,7 @@ test("undoLastChange writes beforeHTML back to the kernel and replaces the block
     const [block] = mount(blockHTML(BLOCK_A, "a0"));
     const beforeHTML = block.outerHTML;
     // 模拟面板应用装饰：块 DOM 被重排，随后保存到服务端
-    block.innerHTML = `<span data-sue="u" style="${UNDERLINE_CSS}">a0</span>`;
+    block.innerHTML = `<span style="${UNDERLINE_CSS}">a0</span>`;
     module.recordChange([blockChange(BLOCK_A, beforeHTML, block.outerHTML)]);
     assert.equal(await module.saveBlockDOM(block), true);
     server.calls.length = 0;
@@ -542,7 +545,7 @@ test("undoLastChange keeps the record and the DOM untouched when the write-back 
     const {module, mount, findBlock, server, close} = createFixture();
     const [block] = mount(blockHTML(BLOCK_A, "a0"));
     const beforeHTML = block.outerHTML;
-    block.innerHTML = `<span data-sue="u" style="${UNDERLINE_CSS}">a0</span>`;
+    block.innerHTML = `<span style="${UNDERLINE_CSS}">a0</span>`;
     const afterHTML = block.outerHTML;
     module.recordChange([blockChange(BLOCK_A, beforeHTML, afterHTML)]);
     server.respondWith({code: -1, msg: "read-only", data: null});

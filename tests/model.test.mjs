@@ -33,6 +33,9 @@ const roundTrip = (pair) => {
     return readPairFromStyle(specs[0]?.css ?? null, specs[1]?.css ?? null);
 };
 
+// 一串 span 的 style 声明了哪条装饰线：方向唯一的落处就是这里
+const readLinesFromCSS = (css) => (css.includes("overline") ? "overline" : "underline");
+
 // ---------------------------------------------------------------- 常量
 
 test("LINE_STYLES holds exactly the five supported line styles in panel order", () => {
@@ -78,6 +81,14 @@ test("共享常量都被冻结，导入方改不到会话的回退底座", () =>
 
 // ---------------------------------------------------------------- composePair
 
+// spec 上不再有标记字段：装饰身份完全由 css 承载，读写两侧都从那几条声明上认它
+const noMarkerField = (spec) =>
+    assert.equal(
+        Object.prototype.hasOwnProperty.call(spec, "marker"),
+        false,
+        `spec 不得再带标记字段：${JSON.stringify(spec)}`,
+    );
+
 test("composePair returns no span at all when both directions are disabled", () => {
     assert.deepEqual(composePair(offPair()), []);
 });
@@ -88,7 +99,7 @@ test("composePair emits a single underline span when only underline is enabled",
         overline: {...OFF},
     });
     assert.equal(specs.length, 1);
-    assert.equal(specs[0].marker, "u");
+    noMarkerField(specs[0]);
     assert.equal(specs[0].position, "underline");
     assert.ok(specs[0].css.includes("text-decoration-line: underline"));
 });
@@ -99,7 +110,7 @@ test("composePair emits a single overline span when only overline is enabled", (
         overline: {enabled: true, style: "wavy", color: ""},
     });
     assert.equal(specs.length, 1);
-    assert.equal(specs[0].marker, "o");
+    noMarkerField(specs[0]);
     assert.equal(specs[0].position, "overline");
     assert.ok(specs[0].css.includes("text-decoration-line: overline"));
 });
@@ -110,7 +121,7 @@ test("composePair merges two identical directions into one span carrying both li
         overline: {enabled: true, style: "dashed", color: "#e5484d"},
     });
     assert.equal(specs.length, 1);
-    assert.equal(specs[0].marker, "b");
+    noMarkerField(specs[0]);
     assert.equal(specs[0].position, "both");
     assert.ok(specs[0].css.includes("text-decoration-line: underline overline"));
 });
@@ -122,10 +133,11 @@ test("composePair nests overline outermost when only the colors differ", () => {
     });
     assert.equal(specs.length, 2);
     // CSS 的 text-decoration-* 作用于元素的全部装饰线，两个方向不同就必须靠嵌套 span 分开承载
-    assert.equal(specs[0].marker, "o");
+    for (const spec of specs) {
+        noMarkerField(spec);
+    }
     assert.equal(specs[0].position, "overline");
     assert.ok(specs[0].css.includes("text-decoration-line: overline"));
-    assert.equal(specs[1].marker, "u");
     assert.equal(specs[1].position, "underline");
     assert.ok(specs[1].css.includes("text-decoration-line: underline"));
 });
@@ -136,7 +148,11 @@ test("composePair nests overline outermost when only the styles differ", () => {
         overline: {enabled: true, style: "double", color: "#0090ff"},
     });
     assert.equal(specs.length, 2);
-    assert.deepEqual(specs.map((spec) => spec.marker), ["o", "u"]);
+    // 方向只写在 css 里：这份顺序就是外层在前
+    assert.deepEqual(
+        specs.map((spec) => readLinesFromCSS(spec.css)),
+        ["overline", "underline"],
+    );
     assert.ok(specs[0].css.includes("text-decoration-style: double"));
     assert.ok(specs[1].css.includes("text-decoration-style: wavy"));
 });
